@@ -18,13 +18,6 @@ pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font
 <header><h1>Video Publishing App</h1><div id="versionBadge" aria-live="polite">◆ MUSE — TEST / FIXING</div><p style="margin:10px 0 0">One system, two doors: coordinator desk and client page, sharing one record.</p></header>
 <main>
 <div id="view-gate">
-  <div class="card" style="border:3px solid #6b21a8">
-    <h2>Clients — type your code here</h2>
-    <p>Open this page, type the code your coordinator sent you, and your page opens. A code is not a clickable link — you open this app, then type the code in.</p>
-    <label for="codeInput">Your code</label><input id="codeInput" placeholder="e.g. C7XP-KJCW" autocomplete="off">
-    <button class="big" onclick="redeem()">Open my page →</button>
-    <p id="codeError" class="error"></p>
-  </div>
   <div class="card">
     <h2>Coordinator</h2>
     <div id="setupBox"><p>First time? Set your coordinator password.</p>
@@ -104,11 +97,6 @@ function show(id){ ['view-gate','view-desk','view-client'].forEach(v=>document.g
 async function setup(){ try{ await api('/api/setup','POST',{password:document.getElementById('setupPw').value}); alert('Password set. Now log in.'); init(); }catch(e){ document.getElementById('gateError').textContent=e.message; } }
 async function login(){ try{ const j=await api('/api/login','POST',{password:document.getElementById('loginPw').value}); coordToken=j.token; localStorage.setItem('coordToken',coordToken); await loadClients(); show('view-desk'); }catch(e){ document.getElementById('gateError').textContent=e.message; } }
 async function logout(){ try{ await api('/api/logout','POST',{},coordToken);}catch{} coordToken=''; localStorage.removeItem('coordToken'); show('view-gate'); }
-async function redeem(){
-  const code=document.getElementById('codeInput').value.trim();
-  try{ const j=await api('/api/redeem','POST',{code}); clientToken=j.token; localStorage.setItem('clientToken',clientToken); await loadClientPage(false); }
-  catch(e){ document.getElementById('codeError').textContent=e.message; }
-}
 function showPreviewBox(){ document.getElementById('previewBox').classList.toggle('hidden'); }
 async function previewClient(){
   const code=document.getElementById('previewCode').value.trim();
@@ -122,7 +110,7 @@ async function createClient(){
     const j=await api('/api/coordinator/clients','POST',body,coordToken); lastSend=j;
     document.getElementById('sendPanel').innerHTML = `<h3>Send panel — check before sending</h3>
       <p><b>Recipient:</b> ${j.client.name} — account #${j.client.accountNumber}<br><b>Email:</b> ${j.client.email}<br><b>Phone:</b> ${j.client.phone||'No phone on file'}</p>
-      <p>Step 1: share this app itself with the client, so they can open it. Step 2: send them the code below, so they can type it in inside the app. The code is not a clickable link.</p>
+      <p>Step 1: share the client page with the client — this app's /client page — so they can open it. Step 2: send them the code below, so they can type it in there. The code is not a clickable link.</p>
       <pre>${j.message}</pre>
       <a href="${j.mailto}"><button>Send via email →</button></a>
       ${j.sms?`<a href="${j.sms}"><button>Send via text →</button></a>`:'<p class="muted">No phone on file, so text is not available for this client.</p>'}
