@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: video-publishing-hosted
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: APP_VERSION
+        value: live
+      # Set DATABASE_URL in the Render dashboard to a free external
+      # Postgres (Supabase/Neon). Do NOT use Render's free Postgres for
+      # live clients: it expires 30 days after creation, then data is deleted.
