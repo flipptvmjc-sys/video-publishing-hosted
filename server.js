@@ -13,9 +13,16 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
+const storage = require('./lib/storage');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
+
+// File uploads: Supabase free tier caps each file at 50MB and total file
+// storage at 1GB. The server enforces the per-file cap up front so nobody
+// sits through a doomed upload; the UI shows usage against the 1GB total.
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
+const STORAGE_TOTAL_BYTES = 1024 * 1024 * 1024;
 
 const BANNED = ['666', '187', '911'];
 function containsBanned(n) {
@@ -49,12 +56,19 @@ function hashPassword(pw, salt) {
 // ---------- JSON store (fallback) ----------
 let db = null;
 function emptyDb() {
-  return { coordinator: null, clients: [], codes: [], portfolio: [], niches: [], videos: [], audit: [], replies: [], coordinatorTokens: [], clientTokens: [] };
+  return { coordinator: null, clients: [], codes: [], portfolio: [], niches: [], videos: [], audit: [], replies: [], coordinatorTokens: [], clientTokens: [], files: [], pendingUploads: [] };
+}
+// Idempotent startup migration: backfills any keys missing from an older
+// stored db (JSON file or the Postgres kv row) without touching existing data.
+function migrateDb(d) {
+  const e = emptyDb();
+  for (const k of Object.keys(e)) if (d[k] === undefined || d[k] === null) d[k] = e[k];
+  return d;
 }
 function loadDb() {
   if (db) return db;
   try { db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { db = emptyDb(); }
-  for (const k of Object.keys(emptyDb())) if (!db[k]) db[k] = emptyDb()[k];
+  db = migrateDb(db);
   return db;
 }
 function saveDb() {
@@ -76,7 +90,7 @@ async function pg() {
 async function pgLoad() {
   const pool = await pg();
   const r = await pool.query('SELECT v FROM kv WHERE k=$1', ['db']);
-  if (r.rows.length) { db = r.rows[0].v; return db; }
+  if (r.rows.length) { db = migrateDb(r.rows[0].v); return db; }
   db = emptyDb();
   await pool.query('INSERT INTO kv(k,v) VALUES($1,$2)', ['db', JSON.stringify(db)]);
   return db;
@@ -94,7 +108,8 @@ function audit(d, clientId, type, text) {
 function clientView(d, c) {
   const codes = d.codes.filter((x) => x.clientId === c.id);
   const active = codes.find((x) => !x.revoked && new Date(x.expiresAt) > new Date());
-  return { ...c, codes, activeCode: active || null, bridgeConnected: codes.some((x) => x.opens > 0), lastOpenedAt: codes.reduce((m, x) => (x.lastOpenedAt && (!m || x.lastOpenedAt > m) ? x.lastOpenedAt : m), null) };
+  const videos = d.videos.filter((v) => v.clientId === c.id).map((v) => ({ id: v.id, title: v.title, status: v.status }));
+  return { ...c, codes, videos, activeCode: active || null, bridgeConnected: codes.some((x) => x.opens > 0), lastOpenedAt: codes.reduce((m, x) => (x.lastOpenedAt && (!m || x.lastOpenedAt > m) ? x.lastOpenedAt : m), null) };
 }
 function requireCoordinator(d, req) {
   const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -104,6 +119,19 @@ function requireClient(d, req) {
   const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const s = d.clientTokens.find((x) => x.token === t);
   return s || null;
+}
+// Who is calling an uploads/files route? { role: 'coordinator' } or
+// { role: 'client', clientId } or null.
+function callerIdentity(d, req) {
+  const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!t) return null;
+  if (d.coordinatorTokens.some((x) => x.token === t)) return { role: 'coordinator' };
+  const s = d.clientTokens.find((x) => x.token === t);
+  return s ? { role: 'client', clientId: s.clientId } : null;
+}
+function sanitizeFilename(name) {
+  const s = String(name || 'file').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 120);
+  return s || 'file';
 }
 async function body(req) {
   const chunks = [];
@@ -282,18 +310,29 @@ const server = http.createServer(async (req, res) => {
       }
       if (p === '/api/client/portfolio' && req.method === 'POST') {
         const b = await body(req);
-        const item = { id: uid(), clientId: client.id, text: b.text || '', links: b.links || '', outcome: b.outcome || '', createdAt: new Date().toISOString() };
+        const fileIds = Array.isArray(b.fileIds) ? b.fileIds : [];
+        for (const fid of fileIds) {
+          const f = d.files.find((x) => x.id === fid);
+          if (!f || f.client_id !== client.id || f.kind !== 'portfolio') return send(res, 400, { error: 'Invalid attached file' });
+        }
+        const item = { id: uid(), clientId: client.id, text: b.text || '', links: b.links || '', outcome: b.outcome || '', fileIds, createdAt: new Date().toISOString() };
         d.portfolio.push(item);
-        audit(d, client.id, 'portfolio', 'Portfolio package sent by client');
+        audit(d, client.id, 'portfolio', `Portfolio package sent by client${fileIds.length ? ` (${fileIds.length} file${fileIds.length > 1 ? 's' : ''} attached)` : ''}`);
         await putDb();
         return send(res, 200, { item });
       }
       if (p === '/api/client/videos' && req.method === 'POST') {
         const b = await body(req);
         if (!b.title) return send(res, 400, { error: 'Video title is required' });
+        const fileIds = Array.isArray(b.fileIds) ? b.fileIds : [];
+        for (const fid of fileIds) {
+          const f = d.files.find((x) => x.id === fid);
+          if (!f || f.client_id !== client.id || !['video', 'thumbnail'].includes(f.kind)) return send(res, 400, { error: 'Invalid attached file' });
+        }
         const video = { id: uid(), clientId: client.id, title: b.title, topic: b.topic || '', promise: b.promise || '', links: b.links || '', ctas: b.ctas || '', thumbnailDirection: b.thumbnailDirection || '', thumbnailChoice: b.thumbnailChoice || 'let-us-choose', clipParts: b.clipParts || 'use-best-parts', series: b.series || '', episode: b.episode || '', status: 'step1', intakeCompleteAt: new Date().toISOString(), deadlineAt: new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString(), blockedReason: '', blockedOwner: '', schedule: {}, postLinks: {}, createdAt: new Date().toISOString() };
         d.videos.push(video);
-        audit(d, client.id, 'video_submitted', `Video submitted: ${video.title} — 3-day clock started`);
+        for (const fid of fileIds) { const f = d.files.find((x) => x.id === fid); if (f) f.video_id = video.id; }
+        audit(d, client.id, 'video_submitted', `Video submitted: ${video.title} — 3-day clock started${fileIds.length ? ` (${fileIds.length} file${fileIds.length > 1 ? 's' : ''} attached)` : ''}`);
         await putDb();
         return send(res, 200, { video });
       }
@@ -312,6 +351,140 @@ const server = http.createServer(async (req, res) => {
       return send(res, 404, { error: 'Not found' });
     }
 
+    // File uploads & files — Supabase Storage, direct browser-to-storage.
+    // The server never proxies file bytes: it signs URLs, verifies arrivals,
+    // and keeps the files ledger. Fails closed (503) when storage env is missing.
+    if (p.startsWith('/api/uploads/') || p.startsWith('/api/files') || p === '/api/storage/usage' || p === '/api/admin/purge') {
+      const storageDown = (e) => {
+        if (e instanceof storage.StorageNotConfiguredError) return send(res, 503, { error: e.message });
+        throw e;
+      };
+      if (p === '/api/uploads/sign' && req.method === 'POST') {
+        const who = callerIdentity(d, req);
+        if (!who) return send(res, 401, { error: 'Sign in required' });
+        const b = await body(req);
+        const kind = b.kind;
+        if (!['portfolio', 'video', 'thumbnail', 'final'].includes(kind)) return send(res, 400, { error: 'Invalid upload kind' });
+        if (kind === 'final' && who.role !== 'coordinator') return send(res, 403, { error: 'Only the coordinator can upload final files' });
+        const bytes = Number(b.bytes);
+        if (!bytes || bytes <= 0) return send(res, 400, { error: 'File size is required' });
+        if (bytes > MAX_FILE_BYTES) return send(res, 400, { error: "Files over 50MB can't upload directly — paste a Google Drive or Dropbox link in the links field instead." });
+        const clientId = who.role === 'client' ? who.clientId : b.clientId;
+        const client = d.clients.find((c) => c.id === clientId);
+        if (!client) return send(res, 404, { error: 'Client not found' });
+        let videoId = b.videoId || null;
+        if (videoId) {
+          const v = d.videos.find((x) => x.id === videoId && x.clientId === client.id);
+          if (!v) return send(res, 404, { error: 'Video not found for this client' });
+        }
+        const filename = sanitizeFilename(b.filename);
+        const fileId = uid();
+        const spath = `clients/${client.id}/${kind}/${fileId}-${filename}`;
+        try {
+          const { uploadUrl } = await storage.createUploadUrl(spath, b.mime || 'application/octet-stream');
+          d.pendingUploads.push({ fileId, path: spath, clientId: client.id, videoId, kind, filename, mime: b.mime || '', bytes, uploaded_by: who.role, createdAt: new Date().toISOString() });
+          d.pendingUploads = d.pendingUploads.filter((x) => Date.now() - new Date(x.createdAt).getTime() < 24 * 3600 * 1000);
+          await putDb();
+          return send(res, 200, { uploadUrl, path: spath, fileId });
+        } catch (e) { return storageDown(e); }
+      }
+      if (p === '/api/uploads/complete' && req.method === 'POST') {
+        const who = callerIdentity(d, req);
+        if (!who) return send(res, 401, { error: 'Sign in required' });
+        const b = await body(req);
+        const pend = d.pendingUploads.find((x) => x.fileId === b.fileId);
+        if (!pend) return send(res, 404, { error: 'Upload session not found or expired — please upload again' });
+        if (who.role === 'client' && pend.clientId !== who.clientId) return send(res, 403, { error: 'Not your upload' });
+        if (b.path && b.path !== pend.path) return send(res, 400, { error: 'Upload path mismatch' });
+        try {
+          const v = await storage.verifyObject(pend.path);
+          if (!v.exists) return send(res, 400, { error: 'File did not arrive in storage — please upload again' });
+          const now = new Date().toISOString();
+          const rec = {
+            id: uid(), client_id: pend.clientId, video_id: pend.videoId || null,
+            kind: pend.kind, storage_path: pend.path, filename: pend.filename,
+            mime: v.mime || pend.mime || '', bytes: v.bytes || pend.bytes,
+            uploaded_by: pend.uploaded_by, created_at: now,
+            // Video-linked files expire 30 days after publish (set at publish
+            // time). Portfolio files expire 90 days after upload.
+            expires_at: pend.kind === 'portfolio' ? new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString() : null,
+          };
+          d.files.push(rec);
+          d.pendingUploads = d.pendingUploads.filter((x) => x.fileId !== pend.fileId);
+          audit(d, pend.clientId, 'file_uploaded', `File uploaded (${pend.kind}): ${pend.filename}`);
+          await putDb();
+          return send(res, 200, { file: rec });
+        } catch (e) { return storageDown(e); }
+      }
+      if (p === '/api/files' && req.method === 'GET') {
+        const who = callerIdentity(d, req);
+        if (!who) return send(res, 401, { error: 'Sign in required' });
+        const clientId = who.role === 'client' ? who.clientId : u.searchParams.get('clientId');
+        if (!clientId) return send(res, 400, { error: 'clientId is required' });
+        if (!d.clients.some((c) => c.id === clientId)) return send(res, 404, { error: 'Client not found' });
+        const videoId = u.searchParams.get('videoId');
+        let files = d.files.filter((f) => f.client_id === clientId);
+        if (videoId) files = files.filter((f) => f.video_id === videoId);
+        files = files.slice().sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+        return send(res, 200, { files });
+      }
+      const dlm = p.match(/^\/api\/files\/([^/]+)\/download$/);
+      if (dlm && req.method === 'GET') {
+        const who = callerIdentity(d, req);
+        if (!who) return send(res, 401, { error: 'Sign in required' });
+        const f = d.files.find((x) => x.id === dlm[1]);
+        if (!f) return send(res, 404, { error: 'File not found' });
+        if (who.role === 'client' && f.client_id !== who.clientId) return send(res, 403, { error: 'Not your file' });
+        try {
+          const downloadUrl = await storage.createDownloadUrl(f.storage_path, 300);
+          return send(res, 200, { downloadUrl });
+        } catch (e) { return storageDown(e); }
+      }
+      const delm = p.match(/^\/api\/files\/([^/]+)\/delete$/);
+      if (delm && req.method === 'POST') {
+        const who = callerIdentity(d, req);
+        if (!who) return send(res, 401, { error: 'Sign in required' });
+        const idx = d.files.findIndex((x) => x.id === delm[1]);
+        if (idx < 0) return send(res, 404, { error: 'File not found' });
+        const f = d.files[idx];
+        if (who.role === 'client' && f.client_id !== who.clientId) return send(res, 403, { error: 'Not your file' });
+        let warning = null;
+        try { await storage.deleteObject(f.storage_path); }
+        catch (e) {
+          if (e instanceof storage.StorageNotConfiguredError) warning = 'Storage was not configured; ledger entry removed.';
+          else warning = 'Storage delete failed, ledger entry removed: ' + e.message;
+        }
+        d.files.splice(idx, 1);
+        audit(d, f.client_id, 'file_deleted', `File deleted: ${f.filename}`);
+        await putDb();
+        return send(res, 200, { ok: true, warning });
+      }
+      if (p === '/api/storage/usage' && req.method === 'GET') {
+        if (!requireCoordinator(d, req)) return send(res, 401, { error: 'Coordinator login required' });
+        const bytesUsed = d.files.reduce((s, f) => s + (Number(f.bytes) || 0), 0);
+        const expiring = d.files.filter((f) => f.expires_at && new Date(f.expires_at).getTime() <= Date.now() + 7 * 24 * 3600 * 1000).length;
+        return send(res, 200, { bytesUsed, bytesTotal: STORAGE_TOTAL_BYTES, fileCount: d.files.length, expiringSoon: expiring, storageConfigured: storage.isConfigured() });
+      }
+      if (p === '/api/admin/purge' && req.method === 'POST') {
+        if (!requireCoordinator(d, req)) return send(res, 401, { error: 'Coordinator login required' });
+        if (!storage.isConfigured()) return send(res, 503, { error: 'File storage is not configured (set SUPABASE_URL and SUPABASE_SERVICE_KEY)' });
+        const now = Date.now();
+        const expired = d.files.filter((f) => f.expires_at && new Date(f.expires_at).getTime() <= now);
+        let deleted = 0, bytesFreed = 0;
+        const errors = [];
+        for (const f of expired) {
+          try { await storage.deleteObject(f.storage_path); }
+          catch (e) { errors.push(`${f.filename}: ${e.message}`); continue; }
+          deleted += 1; bytesFreed += Number(f.bytes) || 0;
+          d.files = d.files.filter((x) => x.id !== f.id);
+          audit(d, f.client_id, 'file_purged', `Expired file purged: ${f.filename}`);
+        }
+        await putDb();
+        return send(res, 200, { deleted, bytesFreed, errors });
+      }
+      return send(res, 404, { error: 'Not found' });
+    }
+
     // Coordinator video actions (stage / schedule / block / reply) — separate, simple
     if (p.startsWith('/api/videos/')) {
       if (!requireCoordinator(d, req)) return send(res, 401, { error: 'Coordinator login required' });
@@ -320,7 +493,16 @@ const server = http.createServer(async (req, res) => {
       const video = d.videos.find((v) => v.id === vm[1]);
       if (!video) return send(res, 404, { error: 'Video not found' });
       const b = await body(req);
-      if (vm[2] === 'stage') { video.status = b.status || video.status; audit(d, video.clientId, 'stage', `Video "${video.title}" moved to ${video.status}`); }
+      if (vm[2] === 'stage') {
+        video.status = b.status || video.status;
+        // Publishing starts the 30-day file-retention clock for this video's files.
+        if (b.status === 'published' && !video.publishedAt) {
+          video.publishedAt = new Date().toISOString();
+          const exp = new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString();
+          d.files.filter((f) => f.video_id === video.id && !f.expires_at).forEach((f) => { f.expires_at = exp; });
+        }
+        audit(d, video.clientId, 'stage', `Video "${video.title}" moved to ${video.status}`);
+      }
       if (vm[2] === 'schedule') { video.schedule = b.schedule || {}; audit(d, video.clientId, 'scheduled', `Video "${video.title}" scheduled`); }
       if (vm[2] === 'block') { video.blockedReason = b.reason || ''; video.blockedOwner = b.owner || 'coordinator'; audit(d, video.clientId, 'blocked', `Video "${video.title}" blocked: ${video.blockedReason} (clock paused)`); }
       if (vm[2] === 'reply') { d.replies.push({ id: uid(), videoId: video.id, text: b.text || '', aiGenerated: true, createdAt: new Date().toISOString() }); audit(d, video.clientId, 'reply', 'First-hour AI reply logged'); }
@@ -337,4 +519,4 @@ const server = http.createServer(async (req, res) => {
 if (require.main === module) {
   server.listen(PORT, () => console.log(`Video Publishing App listening on ${PORT} (storage: ${process.env.DATABASE_URL ? 'postgres' : 'json-file'})`));
 }
-module.exports = { server, pickAccountNumber, containsBanned, threeDigitPool, makeCode, versionBadge };
+module.exports = { server, pickAccountNumber, containsBanned, threeDigitPool, makeCode, versionBadge, migrateDb, emptyDb, MAX_FILE_BYTES, STORAGE_TOTAL_BYTES };
