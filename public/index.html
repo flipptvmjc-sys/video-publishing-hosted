@@ -1,9 +1,12 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Video Publishing App</title>
+<title>Beyond Copper Branding</title>
+<link rel="icon" href="/logo-main.webp">
 <style>
 body{font-family:system-ui,Arial,sans-serif;font-size:19px;line-height:1.45;color:#241b2e;margin:0;background:#f6f2fb}
 header{background:#241b2e;color:#fff;padding:16px 20px;position:sticky;top:0;z-index:100} header h1{margin:0;font-size:28px}
+.brand{display:flex;align-items:center;gap:16px;margin-bottom:6px}.brand-mark{display:flex;flex-direction:column;align-items:center;gap:2px}.brand-logo{width:56px;height:56px;border-radius:12px;display:block}.brand-acronym{font-weight:800;font-size:17px;letter-spacing:3px}.brand-name{font-weight:800;font-size:30px;line-height:1.2}
+.gate-wrap{display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap}.gate-wrap>.card{flex:1;min-width:280px}.secondary-logo{width:140px;height:140px;object-fit:cover;border-radius:16px;margin:16px 0;flex:0 0 auto}
 #versionBadge{display:inline-block;font-size:19px;font-weight:800;padding:8px 14px;border-radius:20px;margin-top:10px;border:3px solid currentColor}
 main{max-width:980px;margin:0 auto;padding:20px} .card{background:#fff;border-radius:14px;padding:20px;margin:16px 0;box-shadow:0 2px 8px rgba(0,0,0,.08)}
 label{display:block;font-weight:700;margin:12px 0 4px} input,select,textarea{width:100%;font-size:19px;padding:12px;border:2px solid #ccc;border-radius:10px;box-sizing:border-box}
@@ -15,9 +18,10 @@ button.secondary{background:#e9e5f5;color:#241b2e} .big{font-size:22px;padding:1
 .hidden{display:none} .row{display:flex;gap:16px;flex-wrap:wrap} .row>*{flex:1;min-width:260px}
 pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font-size:16px}
 </style></head><body>
-<header><h1>Video Publishing App</h1><div id="versionBadge" aria-live="polite">◆ MUSE — TEST / FIXING</div><p style="margin:10px 0 0">One system, two doors: coordinator desk and client page, sharing one record.</p></header>
+<header><div class="brand"><div class="brand-mark"><img src="/logo-main.webp" alt="Beyond Copper Branding logo" class="brand-logo"><span class="brand-acronym">CBM</span></div><div class="brand-name">Beyond Copper Branding</div></div><div id="versionBadge" aria-live="polite">◆ MUSE — TEST / FIXING</div><p style="margin:10px 0 0">One system, two doors: coordinator desk and client page, sharing one record.</p></header>
 <main>
 <div id="view-gate">
+  <div class="gate-wrap">
   <div class="card">
     <h2>Coordinator</h2>
     <div id="setupBox"><p>First time? Set your coordinator password.</p>
@@ -26,6 +30,8 @@ pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font
     <div id="loginBox" class="hidden"><label>Coordinator password</label><input type="password" id="loginPw">
       <button onclick="login()">Log in as coordinator</button></div>
     <p id="gateError" class="error"></p>
+  </div>
+  <img src="/logo-secondary.webp" alt="Beyond Copper Branding" class="secondary-logo">
   </div>
 </div>
 
