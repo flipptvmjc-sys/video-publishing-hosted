@@ -155,7 +155,7 @@ const server = http.createServer(async (req, res) => {
       const fp = path.join(__dirname, 'public', file);
       if (!fp.startsWith(path.join(__dirname, 'public')) || !fs.existsSync(fp)) { res.writeHead(404); return res.end('Not found'); }
       const ext = path.extname(fp);
-      const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
+      const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.webp': 'image/webp', '.png': 'image/png', '.ico': 'image/x-icon' };
       res.writeHead(200, { 'Content-Type': types[ext] || 'text/plain' });
       return fs.createReadStream(fp).pipe(res);
     }
