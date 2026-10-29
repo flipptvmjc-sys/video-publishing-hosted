@@ -1,7 +1,7 @@
 // End-to-end test for the hosted copy. Run: npm test  (starts its own server on 3456)
 const { spawn } = require('child_process');
 const assert = require('assert');
-const { pickAccountNumber, containsBanned, threeDigitPool } = require('./server');
+const { pickAccountNumber, containsBanned, threeDigitPool, migrateDb, emptyDb, MAX_FILE_BYTES } = require('./server');
 
 async function main() {
   // Fresh test database every run — the real app also starts empty.
@@ -74,6 +74,51 @@ async function main() {
     try { await api('/api/redeem', 'POST', { code: c1.code.code }); throw new Error('revoked code should have failed'); }
     catch (e) { assert.ok(/isn't active/.test(e.message), 'revoked code error must say not active'); }
     console.log('Revocation OK.');
+    // ---- File uploads: validation + fail-closed (no SUPABASE_URL/KEY in test env) ----
+    assert.strictEqual(MAX_FILE_BYTES, 50 * 1024 * 1024, 'per-file cap must be 50MB');
+    const migd = migrateDb({});
+    assert.ok(Array.isArray(migd.files) && Array.isArray(migd.pendingUploads), 'migration must backfill files + pendingUploads');
+    assert.ok(Array.isArray(emptyDb().files), 'emptyDb must include files');
+    const apiErr = async (path, method, body, token) => {
+      const r = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+      const j = await r.json().catch(() => ({}));
+      return { status: r.status, body: j };
+    };
+    let e1 = await apiErr('/api/uploads/sign', 'POST', { kind: 'video', filename: 'a.mp4', mime: 'video/mp4', bytes: 1000 }, null);
+    assert.strictEqual(e1.status, 401, 'sign must require auth');
+    e1 = await apiErr('/api/uploads/sign', 'POST', { kind: 'nope', filename: 'a.mp4', mime: 'video/mp4', bytes: 1000 }, ct);
+    assert.strictEqual(e1.status, 400, 'invalid kind must 400');
+    e1 = await apiErr('/api/uploads/sign', 'POST', { kind: 'video', filename: 'big.mp4', mime: 'video/mp4', bytes: 60 * 1024 * 1024 }, ct);
+    assert.strictEqual(e1.status, 400, 'oversize must 400 before storage check');
+    assert.ok(/50MB/.test(e1.body.error), 'oversize error must mention 50MB, got: ' + e1.body.error);
+    e1 = await apiErr('/api/uploads/sign', 'POST', { kind: 'video', filename: 'a.mp4', mime: 'video/mp4', bytes: 1000, clientId: c1.client.id }, ct);
+    assert.strictEqual(e1.status, 503, 'sign must fail closed without storage env');
+    assert.ok(/not configured/i.test(e1.body.error), '503 must say storage not configured');
+    e1 = await apiErr('/api/uploads/complete', 'POST', { fileId: 'nope', path: 'x' }, ct);
+    assert.strictEqual(e1.status, 404, 'complete with bogus fileId must 404');
+    const redeem2 = await api('/api/redeem', 'POST', { code: c2.code.code });
+    e1 = await apiErr('/api/uploads/sign', 'POST', { kind: 'final', filename: 'f.mp4', mime: 'video/mp4', bytes: 1000 }, redeem2.token);
+    assert.strictEqual(e1.status, 403, 'client must not upload kind=final');
+    const lf = await api('/api/files?clientId=' + c1.client.id, 'GET', null, redeem2.token);
+    assert.ok(Array.isArray(lf.files) && lf.files.length === 0, 'client must only ever see own files');
+    await api('/api/files', 'GET', null, redeem2.token);
+    e1 = await apiErr('/api/files', 'GET', null, null);
+    assert.strictEqual(e1.status, 401, 'files list must require auth');
+    e1 = await apiErr('/api/files/nope/download', 'GET', null, ct);
+    assert.strictEqual(e1.status, 404, 'download of unknown file must 404');
+    e1 = await apiErr('/api/files/nope/delete', 'POST', {}, ct);
+    assert.strictEqual(e1.status, 404, 'delete of unknown file must 404');
+    const usage = await api('/api/storage/usage', 'GET', null, ct);
+    assert.strictEqual(usage.bytesUsed, 0, 'usage must start at 0');
+    assert.strictEqual(usage.bytesTotal, 1024 * 1024 * 1024, 'usage total must be 1GB');
+    assert.strictEqual(usage.storageConfigured, false, 'storage must report unconfigured in test');
+    e1 = await apiErr('/api/storage/usage', 'GET', null, null);
+    assert.strictEqual(e1.status, 401, 'usage must require coordinator');
+    e1 = await apiErr('/api/admin/purge', 'POST', {}, ct);
+    assert.strictEqual(e1.status, 503, 'purge must fail closed without storage env');
+    e1 = await apiErr('/api/admin/purge', 'POST', {}, null);
+    assert.strictEqual(e1.status, 401, 'purge must require coordinator');
+    console.log('Upload routes: validation + fail-closed OK');
     // LIVE mode: same code, APP_VERSION=live, must show green LIVE, never Muse.
     const liveChild = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: '3457', DATA_FILE: '/tmp/vp-hosted-test-data-live.json', APP_VERSION: 'live' }, stdio: 'pipe' });
     try {
