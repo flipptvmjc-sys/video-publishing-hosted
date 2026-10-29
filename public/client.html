@@ -17,6 +17,9 @@ button.secondary{background:#e9e5f5;color:#241b2e} .big{font-size:22px;padding:1
 .error{color:#b91c1c;font-weight:700} .muted{color:#555} a{color:#6b21a8;font-weight:700}
 .hidden{display:none} .row{display:flex;gap:16px;flex-wrap:wrap} .row>*{flex:1;min-width:260px}
 pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font-size:16px}
+.upload-row{display:flex;align-items:center;gap:10px;margin:8px 0;font-size:17px}
+.upload-row progress{flex:1;height:14px}
+.file-chip{display:inline-block;background:#e9e5f5;border-radius:20px;padding:4px 12px;margin:4px 6px 4px 0;font-size:16px;font-weight:700}
 </style></head><body>
 <header><div class="brand"><div class="brand-mark"><img src="/logo-main.webp" alt="Beyond Copper Branding logo" class="brand-logo"><span class="brand-acronym">CBM</span></div><div class="brand-name">Beyond Copper Branding</div></div><div id="versionBadge" aria-live="polite">◆ MUSE — TEST / FIXING</div><p style="margin:10px 0 0">Your videos, published for you.</p></header>
 <main>
@@ -39,12 +42,17 @@ pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font
   <div class="card"><h2>1 — Please send us what you already have</h2>
     <label>Videos, pictures, captions, links — and the result you want</label><textarea id="portText" rows="3"></textarea>
     <label>Links</label><input id="portLinks"><label>Desired outcome (required for a niche proposal)</label><input id="portOutcome">
+    <label>Attach videos or pictures (up to 50MB each)</label><input type="file" id="portFiles" multiple accept="video/*,image/*">
+    <div id="portUploadList"></div><p id="portUploadError" class="error"></p>
     <button onclick="sendPortfolio()">Send my work</button></div>
   <div class="card"><h2>2 — Please tap ONE answer on your niche</h2><div id="nicheBox"></div></div>
   <div class="card"><h2>3 — Please let us handle the rest</h2><p>Hands-off Professional Default: silence means proceed. We remake what needs remaking, format, schedule, and handle first-hour replies with AI. You only approve a post if you opted in to per-post approval.</p><div id="defaultBox"></div></div>
   <div class="card"><h2>4 — Submit a video</h2>
     <label>Title</label><input id="vTitle"><label>Topic and one promise</label><input id="vTopic">
     <label>Links and calls to action</label><input id="vLinks"><label>Thumbnail direction</label><input id="vThumb">
+    <label>Attach the video file (up to 50MB)</label><input type="file" id="vFile" accept="video/*">
+    <label>Attach thumbnails (up to 50MB each)</label><input type="file" id="vThumbs" multiple accept="image/*">
+    <div id="vUploadList"></div><p id="vUploadError" class="error"></p>
     <label>Short vertical clip parts (TikTok / Shorts)</label><select id="vClip"><option value="use-best-parts">Use the best parts — recommended</option><option value="only-listed">Only the parts I list</option><option value="keep-out">Keep listed parts out</option></select>
     <label>Series name</label><input id="vSeries"><label>Episode number</label><input id="vEpisode" type="number">
     <button class="big" onclick="submitVideo()">Send video</button></div>
@@ -69,6 +77,36 @@ async function init(){
   if(clientToken){ try{ await loadClientPage(); }catch{ clientToken=''; localStorage.removeItem('clientToken'); } }
 }
 function show(id){ ['view-gate','view-client'].forEach(v=>document.getElementById(v).classList.toggle('hidden', v!==id)); }
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// Direct browser-to-storage uploads with progress. Files are signed by the
+// server, PUT straight to storage, then confirmed — the app server never
+// touches file bytes.
+const MAX_UPLOAD_BYTES = 50*1024*1024;
+const OVERSIZE_MSG = "Files over 50MB can't upload directly — paste a Google Drive or Dropbox link in the links field instead.";
+let portFileIds = [], vFileIds = [];
+async function uploadFiles(fileList, kind, listEl, errEl, collect, token){
+  errEl.textContent = '';
+  for (const f of fileList){
+    if (f.size > MAX_UPLOAD_BYTES){ errEl.textContent = OVERSIZE_MSG; continue; }
+    const row = document.createElement('div'); row.className = 'upload-row';
+    row.innerHTML = `<span style="flex:0 0 auto;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.name)}</span><progress max="100" value="0"></progress><span class="muted">0%</span>`;
+    listEl.appendChild(row);
+    const bar = row.querySelector('progress'), pct = row.querySelectorAll('span')[1];
+    try{
+      const s = await api('/api/uploads/sign','POST',{kind, filename:f.name, mime:f.type||'', bytes:f.size}, token);
+      await new Promise((resolve,reject)=>{
+        const xhr = new XMLHttpRequest();
+        xhr.upload.onprogress = (e)=>{ if(e.lengthComputable){ const p=Math.round(e.loaded/e.total*100); bar.value=p; pct.textContent=p+'%'; } };
+        xhr.onload = ()=> (xhr.status>=200 && xhr.status<300) ? resolve() : reject(new Error('Upload failed (HTTP '+xhr.status+')'));
+        xhr.onerror = ()=> reject(new Error('Upload failed — check your connection and try again'));
+        xhr.open('PUT', s.uploadUrl); xhr.send(f);
+      });
+      const rec = await api('/api/uploads/complete','POST',{fileId:s.fileId, path:s.path}, token);
+      collect.push(rec.file.id);
+      row.innerHTML = `<span class="file-chip">✓ ${esc(f.name)}</span>`;
+    }catch(e){ row.innerHTML = `<span class="error">✕ ${esc(f.name)}: ${esc(e.message)}</span>`; }
+  }
+}
 async function redeem(){
   const code=document.getElementById('codeInput').value.trim();
   try{ const j=await api('/api/redeem','POST',{code}); clientToken=j.token; localStorage.setItem('clientToken',clientToken); await loadClientPage(); }
@@ -87,14 +125,17 @@ async function loadClientPage(){
   show('view-client');
 }
 async function sendPortfolio(){
-  try{ await api('/api/client/portfolio','POST',{text:document.getElementById('portText').value, links:document.getElementById('portLinks').value, outcome:document.getElementById('portOutcome').value},clientToken); alert('Portfolio sent.'); await loadClientPage(); }catch(e){ alert(e.message); }
+  try{ await api('/api/client/portfolio','POST',{text:document.getElementById('portText').value, links:document.getElementById('portLinks').value, outcome:document.getElementById('portOutcome').value, fileIds:portFileIds},clientToken); alert('Portfolio sent.'); portFileIds=[]; document.getElementById('portUploadList').innerHTML=''; await loadClientPage(); }catch(e){ alert(e.message); }
 }
 async function nicheDecision(id, decision){
   try{ await api(`/api/client/niches/${id}/decision`,'POST',{decision},clientToken); alert('Niche '+decision+' recorded.'); await loadClientPage(); }catch(e){ alert(e.message); }
 }
 async function submitVideo(){
-  const body={title:document.getElementById('vTitle').value, topic:document.getElementById('vTopic').value, links:document.getElementById('vLinks').value, thumbnailDirection:document.getElementById('vThumb').value, clipParts:document.getElementById('vClip').value, series:document.getElementById('vSeries').value, episode:document.getElementById('vEpisode').value};
-  try{ await api('/api/client/videos','POST',body,clientToken); alert('Video sent — 3-day clock started.'); await loadClientPage(); }catch(e){ alert(e.message); }
+  const body={title:document.getElementById('vTitle').value, topic:document.getElementById('vTopic').value, links:document.getElementById('vLinks').value, thumbnailDirection:document.getElementById('vThumb').value, clipParts:document.getElementById('vClip').value, series:document.getElementById('vSeries').value, episode:document.getElementById('vEpisode').value, fileIds:vFileIds};
+  try{ await api('/api/client/videos','POST',body,clientToken); alert('Video sent — 3-day clock started.'); vFileIds=[]; document.getElementById('vUploadList').innerHTML=''; await loadClientPage(); }catch(e){ alert(e.message); }
 }
+document.getElementById('portFiles').addEventListener('change', function(){ uploadFiles(this.files,'portfolio',document.getElementById('portUploadList'),document.getElementById('portUploadError'),portFileIds,clientToken); this.value=''; });
+document.getElementById('vFile').addEventListener('change', function(){ uploadFiles(this.files,'video',document.getElementById('vUploadList'),document.getElementById('vUploadError'),vFileIds,clientToken); this.value=''; });
+document.getElementById('vThumbs').addEventListener('change', function(){ uploadFiles(this.files,'thumbnail',document.getElementById('vUploadList'),document.getElementById('vUploadError'),vFileIds,clientToken); this.value=''; });
 init();
 </script></body></html>

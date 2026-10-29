@@ -17,6 +17,12 @@ button.secondary{background:#e9e5f5;color:#241b2e} .big{font-size:22px;padding:1
 .error{color:#b91c1c;font-weight:700} .muted{color:#555} a{color:#6b21a8;font-weight:700}
 .hidden{display:none} .row{display:flex;gap:16px;flex-wrap:wrap} .row>*{flex:1;min-width:260px}
 pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font-size:16px}
+.upload-row{display:flex;align-items:center;gap:10px;margin:8px 0;font-size:17px}
+.upload-row progress{flex:1;height:14px}
+.file-chip{display:inline-block;background:#e9e5f5;border-radius:20px;padding:4px 12px;margin:4px 6px 4px 0;font-size:16px;font-weight:700}
+.file-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0;padding:8px 10px;background:#f3f4f6;border-radius:10px;font-size:17px}
+.file-row .fname{font-weight:700;flex:1;min-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file-row button{font-size:15px;padding:8px 14px;margin:2px}
 </style></head><body>
 <header><div class="brand"><div class="brand-mark"><img src="/logo-main.webp" alt="Beyond Copper Branding logo" class="brand-logo"><span class="brand-acronym">CBM</span></div><div class="brand-name">Beyond Copper Branding</div></div><div id="versionBadge" aria-live="polite">◆ MUSE — TEST / FIXING</div><p style="margin:10px 0 0">One system, two doors: coordinator desk and client page, sharing one record.</p></header>
 <main>
@@ -41,6 +47,11 @@ pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font
     <button class="secondary" onclick="showPreviewBox()">Preview client side — enter a code</button>
     <div id="previewBox" class="hidden"><label>Client code to preview</label><input id="previewCode">
       <button onclick="previewClient()">Open client page (you stay logged in)</button><p class="muted">Preview does not sign you out. Use “Back to my desk” to return.</p></div>
+  </div>
+  <div class="card"><h2>Storage</h2>
+    <p id="storageUsage" class="muted">Loading…</p>
+    <button class="secondary" onclick="purgeExpired()">Clean up expired files</button>
+    <p id="purgeResult" class="muted"></p>
   </div>
   <div class="card"><h2>Your job: create a client</h2>
     <label>Client name</label><input id="cName">
@@ -134,15 +145,83 @@ async function loadClients(){
   document.getElementById('clientList').innerHTML = clients.map((c,i)=>`<p><button class="secondary" onclick="selectClient(${i})">${c.name} — #${c.accountNumber}</button> ${c.bridgeConnected?'<span class="badge">🌉 Bridge connected</span>':''} ${c.activeCode?`Code: ${c.activeCode.code} (opens: ${c.activeCode.opens})`:''}</p>`).join('') || '<p>No clients yet. Create your first one above.</p>';
   document.getElementById('clientPos').textContent = clients.length?` ${clientIndex+1} of ${clients.length}`:'';
   if(clients.length) selectClient(clientIndex, true);
+  loadStorageUsage();
   // SLA queue from client videos is shown on client detail load; keep a simple count here
 }
+function esc(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtMB(b){ return (Number(b)/1048576).toFixed(1)+' MB'; }
 function selectClient(i, quiet){
   clientIndex=i; const c=clients[i]; if(!c) return; currentClientId=c.id;
-  document.getElementById('clientDetail').innerHTML = `<h3>${c.name} — account #${c.accountNumber}</h3>
+  document.getElementById('clientDetail').innerHTML = `<h3>${esc(c.name)} — account #${c.accountNumber}</h3>
     ${c.bridgeConnected?`<div class="banner">🌉 Bridge connected — last opened ${c.lastOpenedAt||''}, opens: ${c.codes.reduce((s,x)=>s+x.opens,0)}</div>`:''}
-    <p>Email: ${c.email} | Phone: ${c.phone||'—'} | Approval: ${c.approvalMode}</p>
-    <p>To test this client: Preview client side above, enter code ${c.activeCode?c.activeCode.code:'(no active code)'}.</p>`;
+    <p>Email: ${esc(c.email)} | Phone: ${esc(c.phone)||'—'} | Approval: ${esc(c.approvalMode)}</p>
+    <p>To test this client: Preview client side above, enter code ${c.activeCode?c.activeCode.code:'(no active code)'}.</p>
+    <h3>Files</h3><div id="coordFileList"><p class="muted">Loading…</p></div>
+    <h3>Upload final files</h3>
+    <label>Attach to video (optional)</label><select id="finalVideoSel"><option value="">Client-level (no video)</option></select>
+    <label>Final edited video (up to 50MB)</label><input type="file" id="finalVideoFile" accept="video/*">
+    <label>Thumbnails (up to 50MB each)</label><input type="file" id="finalThumbFiles" multiple accept="image/*">
+    <div id="finalUploadList"></div><p id="finalUploadError" class="error"></p>`;
+  loadCoordFiles(c.id);
+  (c.videos||[]).forEach(v=>{ const o=document.createElement('option'); o.value=v.id; o.textContent=v.title+' ('+v.status+')'; document.getElementById('finalVideoSel').appendChild(o); });
+  document.getElementById('finalVideoFile').addEventListener('change', function(){ coordUploadFiles(this.files,'final',c.id,document.getElementById('finalVideoSel').value||null); this.value=''; });
+  document.getElementById('finalThumbFiles').addEventListener('change', function(){ coordUploadFiles(this.files,'thumbnail',c.id,document.getElementById('finalVideoSel').value||null); this.value=''; });
   if(!quiet) document.getElementById('clientDetail').scrollIntoView();
+}
+async function loadCoordFiles(clientId){
+  const el = document.getElementById('coordFileList'); if(!el) return;
+  try{
+    const j = await api('/api/files?clientId='+encodeURIComponent(clientId),'GET',null,coordToken);
+    el.innerHTML = j.files.map(f=>`<div class="file-row"><span class="fname">${esc(f.filename)}</span><span class="muted">${esc(f.kind)} · ${fmtMB(f.bytes)} · ${esc(f.uploaded_by)}${f.expires_at?` · expires ${new Date(f.expires_at).toLocaleDateString()}`:''}</span><button class="secondary" onclick="downloadFile('${f.id}')">Download</button><button class="secondary" onclick="deleteFile('${f.id}')">Delete</button></div>`).join('') || '<p class="muted">No files yet.</p>';
+  }catch(e){ el.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+}
+async function coordUploadFiles(fileList, kind, clientId, videoId){
+  const listEl = document.getElementById('finalUploadList'), errEl = document.getElementById('finalUploadError');
+  errEl.textContent = '';
+  for (const f of fileList){
+    if (f.size > 50*1024*1024){ errEl.textContent = "Files over 50MB can't upload directly."; continue; }
+    const row = document.createElement('div'); row.className='upload-row';
+    row.innerHTML = `<span style="flex:0 0 auto;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.name)}</span><progress max="100" value="0"></progress><span class="muted">0%</span>`;
+    listEl.appendChild(row);
+    const bar=row.querySelector('progress'), pct=row.querySelectorAll('span')[1];
+    try{
+      const s = await api('/api/uploads/sign','POST',{kind, filename:f.name, mime:f.type||'', bytes:f.size, clientId, videoId}, coordToken);
+      await new Promise((resolve,reject)=>{
+        const xhr=new XMLHttpRequest();
+        xhr.upload.onprogress=(e)=>{ if(e.lengthComputable){ const p=Math.round(e.loaded/e.total*100); bar.value=p; pct.textContent=p+'%'; } };
+        xhr.onload=()=> (xhr.status>=200&&xhr.status<300)?resolve():reject(new Error('Upload failed (HTTP '+xhr.status+')'));
+        xhr.onerror=()=>reject(new Error('Upload failed — check your connection and try again'));
+        xhr.open('PUT', s.uploadUrl); xhr.send(f);
+      });
+      await api('/api/uploads/complete','POST',{fileId:s.fileId, path:s.path}, coordToken);
+      row.innerHTML = `<span class="file-chip">✓ ${esc(f.name)}</span>`;
+      loadCoordFiles(clientId);
+    }catch(e){ row.innerHTML = `<span class="error">✕ ${esc(f.name)}: ${esc(e.message)}</span>`; }
+  }
+}
+async function downloadFile(id){
+  try{ const j = await api('/api/files/'+id+'/download','GET',null,coordToken); window.open(j.downloadUrl,'_blank'); }
+  catch(e){ alert(e.message); }
+}
+async function deleteFile(id){
+  if(!confirm('Delete this file? It will be removed from storage.')) return;
+  try{ const j = await api('/api/files/'+id+'/delete','POST',{},coordToken); if(j.warning) alert(j.warning); loadCoordFiles(currentClientId); loadStorageUsage(); }
+  catch(e){ alert(e.message); }
+}
+async function loadStorageUsage(){
+  const el = document.getElementById('storageUsage'); if(!el) return;
+  try{
+    const j = await api('/api/storage/usage','GET',null,coordToken);
+    el.textContent = `Storage used: ${fmtMB(j.bytesUsed)} of ${fmtMB(j.bytesTotal)} (${j.fileCount} file${j.fileCount===1?'':'s'})${j.expiringSoon?` — ${j.expiringSoon} expiring within 7 days`:''}${j.storageConfigured?'':' — storage not configured'}`;
+  }catch(e){ el.textContent = 'Storage usage unavailable: '+e.message; }
+}
+async function purgeExpired(){
+  if(!confirm('Delete all expired files from storage? This cannot be undone.')) return;
+  try{
+    const j = await api('/api/admin/purge','POST',{},coordToken);
+    document.getElementById('purgeResult').textContent = `Cleaned up: ${j.deleted} file${j.deleted===1?'':'s'} deleted, ${fmtMB(j.bytesFreed)} freed${j.errors.length?` — ${j.errors.length} error(s): `+j.errors.join('; '):''}`;
+    loadCoordFiles(currentClientId); loadStorageUsage();
+  }catch(e){ alert(e.message); }
 }
 function prevClient(){ if(clients.length){ clientIndex=(clientIndex-1+clients.length)%clients.length; selectClient(clientIndex); } }
 function nextClient(){ if(clients.length){ clientIndex=(clientIndex+1)%clients.length; selectClient(clientIndex); } }
