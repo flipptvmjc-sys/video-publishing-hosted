@@ -116,12 +116,14 @@ function send(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 function mailtoLink(client, code, baseUrl) {
+  const clientUrl = `${baseUrl}/client`;
   const subject = encodeURIComponent(`Your Video Publishing page — account #${client.accountNumber}`);
-  const bodyText = `Hi ${client.name},\n\nYour Video Publishing page is ready.\n\nStep 1: open this app at ${baseUrl}\nStep 2: type this code on the first screen: ${code.code}\n\nYour account number is ${client.accountNumber}. The code expires in 7 days.\n\nThis code is not a clickable link — please open the app above and type the code in.`;
+  const bodyText = `Hi ${client.name},\n\nYour Video Publishing page is ready.\n\nStep 1: open your client page at ${clientUrl}\nStep 2: type this code on the first screen: ${code.code}\n\nYour account number is ${client.accountNumber}. The code expires in 7 days.\n\nThis code is not a clickable link — please open the page above and type the code in.`;
   return `mailto:${encodeURIComponent(client.email)}?subject=${subject}&body=${encodeURIComponent(bodyText)}`;
 }
 function smsLink(client, code, baseUrl) {
-  const text = `Hi ${client.name}, your Video Publishing page is ready. Open ${baseUrl}, then type this code: ${code.code} (account #${client.accountNumber}, expires in 7 days). The code is not a clickable link — open the app and type it in.`;
+  const clientUrl = `${baseUrl}/client`;
+  const text = `Hi ${client.name}, your Video Publishing page is ready. Open ${clientUrl}, then type this code: ${code.code} (account #${client.accountNumber}, expires in 7 days). The code is not a clickable link — open the page and type it in.`;
   return `sms:${encodeURIComponent(client.phone || '')}?body=${encodeURIComponent(text)}`;
 }
 // Version badge — environment flag, same code in both places.
@@ -138,7 +140,8 @@ function versionBadge() {
   return { env: 'muse', label: 'MUSE — TEST / FIXING', dot: '◆', colour: '#b45309', background: '#fef3c7', text: '◆ MUSE — TEST / FIXING' };
 }
 function fullMessage(client, code, baseUrl) {
-  return `Hi ${client.name}, your Video Publishing page is ready.\n\nStep 1: open this app at ${baseUrl}\nStep 2: type this code on the first screen: ${code.code}\n\nYour account number is ${client.accountNumber}. The code expires in 7 days.\nThis code is not a clickable link — open the app above and type the code in.`;
+  const clientUrl = `${baseUrl}/client`;
+  return `Hi ${client.name}, your Video Publishing page is ready.\n\nStep 1: open your client page at ${clientUrl}\nStep 2: type this code on the first screen: ${code.code}\n\nYour account number is ${client.accountNumber}. The code expires in 7 days.\nThis code is not a clickable link — open the page above and type the code in.`;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -146,7 +149,9 @@ const server = http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://localhost');
     const p = u.pathname;
     if (!p.startsWith('/api/')) {
-      let file = p === '/' ? '/index.html' : p;
+      // Two doors, one backend: '/' is the coordinator-only desk, '/client'
+      // is the client-only page. Both share the same record and /api/* routes.
+      let file = p === '/' ? '/index.html' : p === '/client' ? '/client.html' : p;
       const fp = path.join(__dirname, 'public', file);
       if (!fp.startsWith(path.join(__dirname, 'public')) || !fs.existsSync(fp)) { res.writeHead(404); return res.end('Not found'); }
       const ext = path.extname(fp);
