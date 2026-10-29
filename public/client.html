@@ -15,6 +15,11 @@ button.secondary{background:#e9e5f5;color:#241b2e} .big{font-size:22px;padding:1
 .banner{background:#dcfce7;border:2px solid #16a34a;padding:14px;border-radius:12px;font-weight:700}
 .badge{background:#16a34a;color:#fff;padding:4px 10px;border-radius:20px;font-size:16px}
 .error{color:#b91c1c;font-weight:700} .muted{color:#555} a{color:#6b21a8;font-weight:700}
+.file-banner{display:block;border:3px dashed #6b21a8;border-radius:12px;padding:16px;margin:12px 0 4px;cursor:pointer;background:#faf8ff}
+.file-banner:active{background:#efe6fb}
+.file-banner-title{display:block;font-weight:700}
+.file-banner-hint{display:block;color:#555;font-size:16px;margin-top:4px}
+.file-input-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .hidden{display:none} .row{display:flex;gap:16px;flex-wrap:wrap} .row>*{flex:1;min-width:260px}
 pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font-size:16px}
 .upload-row{display:flex;align-items:center;gap:10px;margin:8px 0;font-size:17px}
@@ -42,7 +47,7 @@ pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font
   <div class="card"><h2>1 — Please send us what you already have</h2>
     <label>Videos, pictures, captions, links — and the result you want</label><textarea id="portText" rows="3"></textarea>
     <label>Links</label><input id="portLinks"><label>Desired outcome (required for a niche proposal)</label><input id="portOutcome">
-    <label>Attach videos or pictures (up to 50MB each)</label><input type="file" id="portFiles" multiple accept="video/*,image/*">
+    <label class="file-banner" for="portFiles" tabindex="0"><span class="file-banner-title">Attach videos or pictures (up to 50MB each)</span><span class="file-banner-hint">Tap here to choose files, or paste them here</span></label><input type="file" id="portFiles" class="file-input-hidden" multiple accept="video/*,image/*">
     <div id="portUploadList"></div><p id="portUploadError" class="error"></p>
     <button onclick="sendPortfolio()">Send my work</button></div>
   <div class="card"><h2>2 — Please tap ONE answer on your niche</h2><div id="nicheBox"></div></div>
@@ -50,8 +55,8 @@ pre{white-space:pre-wrap;background:#f3f4f6;padding:12px;border-radius:10px;font
   <div class="card"><h2>4 — Submit a video</h2>
     <label>Title</label><input id="vTitle"><label>Topic and one promise</label><input id="vTopic">
     <label>Links and calls to action</label><input id="vLinks"><label>Thumbnail direction</label><input id="vThumb">
-    <label>Attach the video file (up to 50MB)</label><input type="file" id="vFile" accept="video/*">
-    <label>Attach thumbnails (up to 50MB each)</label><input type="file" id="vThumbs" multiple accept="image/*">
+    <label class="file-banner" for="vFile" tabindex="0"><span class="file-banner-title">Attach the video file (up to 50MB)</span><span class="file-banner-hint">Tap here to choose a file, or paste it here</span></label><input type="file" id="vFile" class="file-input-hidden" accept="video/*">
+    <label class="file-banner" for="vThumbs" tabindex="0"><span class="file-banner-title">Attach thumbnails (up to 50MB each)</span><span class="file-banner-hint">Tap here to choose files, or paste them here</span></label><input type="file" id="vThumbs" class="file-input-hidden" multiple accept="image/*">
     <div id="vUploadList"></div><p id="vUploadError" class="error"></p>
     <label>Short vertical clip parts (TikTok / Shorts)</label><select id="vClip"><option value="use-best-parts">Use the best parts — recommended</option><option value="only-listed">Only the parts I list</option><option value="keep-out">Keep listed parts out</option></select>
     <label>Series name</label><input id="vSeries"><label>Episode number</label><input id="vEpisode" type="number">
@@ -137,5 +142,22 @@ async function submitVideo(){
 document.getElementById('portFiles').addEventListener('change', function(){ uploadFiles(this.files,'portfolio',document.getElementById('portUploadList'),document.getElementById('portUploadError'),portFileIds,clientToken); this.value=''; });
 document.getElementById('vFile').addEventListener('change', function(){ uploadFiles(this.files,'video',document.getElementById('vUploadList'),document.getElementById('vUploadError'),vFileIds,clientToken); this.value=''; });
 document.getElementById('vThumbs').addEventListener('change', function(){ uploadFiles(this.files,'thumbnail',document.getElementById('vUploadList'),document.getElementById('vUploadError'),vFileIds,clientToken); this.value=''; });
+// Whole-banner tap targets: tapping (or Enter/Space on) a banner opens its picker; pasting files onto a banner uploads them there.
+const pickerZones = {
+  portFiles: ()=>({kind:'portfolio', listEl:document.getElementById('portUploadList'), errEl:document.getElementById('portUploadError'), collect:portFileIds, token:clientToken}),
+  vFile: ()=>({kind:'video', listEl:document.getElementById('vUploadList'), errEl:document.getElementById('vUploadError'), collect:vFileIds, token:clientToken}),
+  vThumbs: ()=>({kind:'thumbnail', listEl:document.getElementById('vUploadList'), errEl:document.getElementById('vUploadError'), collect:vFileIds, token:clientToken}),
+};
+document.querySelectorAll('.file-banner').forEach(b=>{
+  const target = document.getElementById(b.getAttribute('for'));
+  b.addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); target.click(); } });
+  b.addEventListener('paste', e=>{
+    const files = e.clipboardData && e.clipboardData.files;
+    if(!files || !files.length) return;
+    e.preventDefault();
+    const z = pickerZones[b.getAttribute('for')]();
+    uploadFiles(files, z.kind, z.listEl, z.errEl, z.collect, z.token);
+  });
+});
 init();
 </script></body></html>
