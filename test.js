@@ -1,7 +1,10 @@
 // End-to-end test for the hosted copy. Run: npm test  (starts its own server on 3456)
 const { spawn } = require('child_process');
 const assert = require('assert');
-const { pickAccountNumber, containsBanned, threeDigitPool, migrateDb, emptyDb, MAX_FILE_BYTES } = require('./server');
+// DATA_FILE for THIS process (unit tests below call putDb indirectly): keep
+// junk out of the work dir. Child servers get their own DATA_FILE in env.
+process.env.DATA_FILE = '/tmp/vp-oauth-unit-data.json';
+const { pickAccountNumber, containsBanned, threeDigitPool, migrateDb, emptyDb, MAX_FILE_BYTES, tiktok, getValidTiktokToken } = require('./server');
 
 async function main() {
   // Fresh test database every run — the real app also starts empty.
@@ -119,6 +122,141 @@ async function main() {
     e1 = await apiErr('/api/admin/purge', 'POST', {}, null);
     assert.strictEqual(e1.status, 401, 'purge must require coordinator');
     console.log('Upload routes: validation + fail-closed OK');
+    // ---- TikTok Login Kit OAuth ----
+    // Fail-closed without TIKTOK_CLIENT_KEY/SECRET on the main test server.
+    const rawGet = async (path, token) => {
+      const r = await fetch(base + path, { method: 'GET', headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      return { status: r.status, text: await r.text(), headers: r.headers };
+    };
+    let t1 = await apiErr('/auth/tiktok/login?clientId=' + c1.client.id, 'GET', null, ct);
+    assert.strictEqual(t1.status, 503, 'tiktok login must 503 without env');
+    assert.ok(/TIKTOK_CLIENT_KEY/.test(t1.body.error), '503 must name the missing env vars');
+    t1 = await rawGet('/auth/tiktok/callback?code=x&state=y', null);
+    assert.strictEqual(t1.status, 503, 'tiktok callback must 503 without env');
+    assert.ok(/not connected/i.test(t1.text), 'callback 503 page must say not connected');
+    const ts0 = await api('/api/tiktok/status?clientId=' + c1.client.id, 'GET', null, ct);
+    assert.strictEqual(ts0.configured, false, 'status must report unconfigured without env');
+    assert.strictEqual(ts0.connected, false, 'status must report not connected');
+    t1 = await apiErr('/api/tiktok/status?clientId=' + c1.client.id, 'GET', null, null);
+    assert.strictEqual(t1.status, 401, 'tiktok status must require coordinator');
+    const migT = migrateDb({});
+    assert.ok(Array.isArray(migT.tiktokOauthStates) && Array.isArray(migT.tiktokTokens), 'migration must backfill tiktokOauthStates + tiktokTokens');
+    console.log('TikTok fail-closed (no env) OK');
+
+    // Unit: auth URL shape, mocked token exchange/refresh, vault crypto, scoping.
+    // Fake the env for THIS process only (the main test server above already
+    // proved the unconfigured fail-closed path; it runs in its own process).
+    process.env.TIKTOK_CLIENT_KEY = 'UNITKEY';
+    process.env.TIKTOK_CLIENT_SECRET = 'UNITSECRET';
+    const au = tiktok.buildAuthUrl({ clientKey: 'FAKEKEY', redirectUri: 'https://example.com/auth/tiktok/callback', state: 's'.repeat(64) });
+    const auq = new URL(au);
+    assert.strictEqual(auq.origin + auq.pathname, 'https://www.tiktok.com/v2/auth/authorize/');
+    assert.strictEqual(auq.searchParams.get('client_key'), 'FAKEKEY');
+    assert.strictEqual(auq.searchParams.get('scope'), 'user.info.basic');
+    assert.strictEqual(auq.searchParams.get('response_type'), 'code');
+    assert.strictEqual(auq.searchParams.get('redirect_uri'), 'https://example.com/auth/tiktok/callback');
+    assert.strictEqual(auq.searchParams.get('state'), 's'.repeat(64));
+    const fakeTokens = { access_token: 'AT1', refresh_token: 'RT1', open_id: 'OID1', expires_in: 86400, refresh_expires_in: 31536000, scope: 'user.info.basic', token_type: 'Bearer' };
+    const okPost = async () => fakeTokens;
+    const ex = await tiktok.exchangeCode({ code: 'c', redirectUri: 'https://example.com/auth/tiktok/callback', httpPost: okPost });
+    assert.strictEqual(ex.access_token, 'AT1', 'mocked exchange must return tokens');
+    const errPost = async () => ({ error: 'invalid_grant', error_description: 'Authorization code is invalid.' });
+    try { await tiktok.exchangeCode({ code: 'bad', redirectUri: 'https://example.com/x', httpPost: errPost }); throw new Error('exchange should have thrown'); }
+    catch (e) { assert.ok(/Authorization code is invalid/.test(e.message), 'exchange must surface TikTok error_description'); }
+    try { await tiktok.exchangeCode({ code: 'c', redirectUri: 'https://example.com/x', httpPost: async () => { throw new Error('boom'); } }); throw new Error('exchange should have thrown'); }
+    catch (e) { assert.ok(/boom/.test(e.message), 'exchange must propagate transport errors'); }
+    const rf = await tiktok.refreshAccessToken({ refreshToken: 'RT1', httpPost: okPost });
+    assert.strictEqual(rf.refresh_token, 'RT1', 'mocked refresh must return tokens');
+    try { await tiktok.refreshAccessToken({ refreshToken: 'RT1', httpPost: errPost }); throw new Error('refresh should have thrown'); }
+    catch (e) { assert.ok(/invalid/.test(e.message), 'refresh must surface TikTok errors'); }
+    delete process.env.TOKEN_VAULT_KEY;
+    const vd = { coordinator: { salt: 'unit-test-salt' } };
+    const vkey = tiktok.deriveVaultKey(vd);
+    assert.strictEqual(vkey.length, 32, 'vault key must be 32 bytes');
+    const rt = tiktok.decryptJson(vkey, tiktok.encryptJson(vkey, { a: 1, s: 'x' }));
+    assert.deepStrictEqual(rt, { a: 1, s: 'x' }, 'vault encrypt/decrypt must round-trip');
+    const recA = tiktok.buildVaultRecord({ clientId: 'clientA', network: 'tiktok', tokenJson: fakeTokens, key: vkey });
+    const recB = tiktok.buildVaultRecord({ clientId: 'clientB', network: 'tiktok', tokenJson: { ...fakeTokens, access_token: 'AT-B' }, key: vkey });
+    const vault = [recA, recB];
+    assert.strictEqual(tiktok.findVaultRecord(vault, 'clientA', 'tiktok'), recA, 'client A must get own record');
+    assert.strictEqual(tiktok.findVaultRecord(vault, 'clientB', 'tiktok'), recB, 'client B must get own record');
+    assert.strictEqual(tiktok.findVaultRecord(vault, 'clientC', 'tiktok'), null, 'unknown client must get null');
+    assert.strictEqual(tiktok.findVaultRecord(vault, 'clientA', 'instagram'), null, 'wrong network must get null');
+    const readA = tiktok.readVaultRecord(recA, vkey);
+    assert.strictEqual(readA.accessToken, 'AT1', 'vault read must decrypt access token');
+    assert.ok(!JSON.stringify(recA).includes('AT1'), 'stored record must not contain the plaintext token');
+    assert.strictEqual(tiktok.isTokenFresh(new Date(Date.now() + 3600 * 1000).toISOString()), true, 'token with 1h left is fresh');
+    assert.strictEqual(tiktok.isTokenFresh(new Date(Date.now() - 1000).toISOString()), false, 'expired token is not fresh');
+    assert.strictEqual(tiktok.isTokenFresh(new Date(Date.now() + 60 * 1000).toISOString()), false, 'token with 1m left is not fresh (5m leeway)');
+    console.log('TikTok unit (auth URL, mocked exchange/refresh, vault crypto + scoping) OK');
+
+    // getValidTiktokToken: fresh token returned as-is (http must NOT be called);
+    // expired token triggers refresh and the stored record is updated.
+    const ud = { coordinator: { salt: 'unit-test-salt' }, tiktokTokens: [] };
+    const freshRec = tiktok.buildVaultRecord({ clientId: 'uA', network: 'tiktok', tokenJson: { ...fakeTokens, expires_in: 3600 }, key: vkey });
+    ud.tiktokTokens.push(freshRec);
+    const explodingPost = async () => { throw new Error('must not call http for a fresh token'); };
+    const got1 = await getValidTiktokToken(ud, 'uA', explodingPost);
+    assert.strictEqual(got1.accessToken, 'AT1', 'fresh token must be returned without refresh');
+    const expiredRec = tiktok.buildVaultRecord({ clientId: 'uB', network: 'tiktok', tokenJson: { ...fakeTokens, access_token: 'OLD', refresh_token: 'RT-OLD', expires_in: -10 }, key: vkey });
+    ud.tiktokTokens.push(expiredRec);
+    const got2 = await getValidTiktokToken(ud, 'uB', async () => ({ ...fakeTokens, access_token: 'NEW', refresh_token: 'RT-NEW' }));
+    assert.strictEqual(got2.accessToken, 'NEW', 'expired token must be refreshed');
+    const storedB = tiktok.findVaultRecord(ud.tiktokTokens, 'uB', 'tiktok');
+    assert.strictEqual(tiktok.readVaultRecord(storedB, vkey).accessToken, 'NEW', 'refreshed token must be stored');
+    assert.strictEqual(await getValidTiktokToken(ud, 'nobody', explodingPost), null, 'unconnected client must get null');
+    console.log('getValidTiktokToken (fresh/refresh/null) OK');
+
+    // Second server WITH faked TikTok env: login builds a real 302 to TikTok,
+    // state validates, single-use holds, exchange failure -> 502 page.
+    const port2 = 3458;
+    const child2 = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: String(port2), DATA_FILE: '/tmp/vp-oauth-test-data2.json', TIKTOK_CLIENT_KEY: 'FAKEKEY123', TIKTOK_CLIENT_SECRET: 'FAKESECRET' }, stdio: 'pipe' });
+    const base2 = `http://127.0.0.1:${port2}`;
+    try {
+      for (let i = 0; i < 50; i++) { try { const r = await fetch(base2 + '/api/health'); if (r.ok) break; } catch {} await new Promise(r => setTimeout(r, 200)); }
+      const api2 = async (path, method, body, token, raw) => {
+        const r = await fetch(base2 + path, { method, redirect: 'manual', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined });
+        if (raw) return { status: r.status, text: await r.text(), headers: r.headers };
+        const j = await r.json(); if (!r.ok) throw new Error(`${path} -> ${JSON.stringify(j)}`); return j;
+      };
+      await api2('/api/setup', 'POST', { password: 'pw22' });
+      const login2 = await api2('/api/login', 'POST', { password: 'pw22' });
+      const ct2 = login2.token;
+      const cc = await api2('/api/coordinator/clients', 'POST', { name: 'TikTok Client', email: 'tt@example.com' }, ct2);
+      let l1 = await api2('/auth/tiktok/login?clientId=' + cc.client.id, 'GET', null, null, true);
+      assert.strictEqual(l1.status, 401, 'tiktok login must require coordinator auth');
+      l1 = await api2('/auth/tiktok/login?clientId=' + cc.client.id, 'GET', null, ct2, true);
+      assert.strictEqual(l1.status, 302, 'tiktok login must 302 to TikTok');
+      const loc = l1.headers.get('location');
+      const lq = new URL(loc);
+      assert.strictEqual(lq.origin + lq.pathname, 'https://www.tiktok.com/v2/auth/authorize/', 'must redirect to TikTok authorize, got: ' + loc);
+      assert.strictEqual(lq.searchParams.get('client_key'), 'FAKEKEY123');
+      assert.strictEqual(lq.searchParams.get('scope'), 'user.info.basic');
+      assert.strictEqual(lq.searchParams.get('response_type'), 'code');
+      assert.ok(lq.searchParams.get('redirect_uri').endsWith('/auth/tiktok/callback'), 'redirect_uri must be the callback path, got: ' + lq.searchParams.get('redirect_uri'));
+      assert.ok(/^[0-9a-f]{64}$/.test(lq.searchParams.get('state')), 'state must be 64 hex chars');
+      assert.ok(!loc.includes('FAKESECRET'), 'redirect must never leak the client secret');
+      console.log('TikTok login 302 OK:', lq.origin + lq.pathname);
+      const ts2 = await api2('/api/tiktok/status?clientId=' + cc.client.id, 'GET', null, ct2);
+      assert.strictEqual(ts2.configured, true, 'status must report configured with env');
+      assert.strictEqual(ts2.connected, false, 'status must report not connected before callback');
+      let cb = await api2('/auth/tiktok/callback?code=x&state=bogus', 'GET', null, null, true);
+      assert.strictEqual(cb.status, 400, 'bogus state must 400');
+      assert.ok(/invalid or expired/i.test(cb.text), 'bogus state page must say invalid or expired');
+      // Valid state + fake code: TikTok is unreachable from here, so the
+      // exchange fails and the callback must fail closed with a 502 page.
+      const state = lq.searchParams.get('state');
+      cb = await api2(`/auth/tiktok/callback?code=fake&state=${state}`, 'GET', null, null, true);
+      assert.strictEqual(cb.status, 502, 'failed exchange must 502, got ' + cb.status);
+      assert.ok(/token/i.test(cb.text), '502 page must mention the token failure');
+      assert.ok(!cb.text.includes('FAKESECRET'), 'error page must never leak the client secret');
+      // State is single-use: same state again must 400.
+      cb = await api2(`/auth/tiktok/callback?code=fake&state=${state}`, 'GET', null, null, true);
+      assert.strictEqual(cb.status, 400, 'reused state must 400');
+      console.log('TikTok callback (state validation, single-use, exchange fail-closed) OK');
+    } finally { child2.kill(); }
+    try { fs.unlinkSync('/tmp/vp-oauth-unit-data.json'); } catch {}
+    try { fs.unlinkSync('/tmp/vp-oauth-test-data2.json'); } catch {}
     // LIVE mode: same code, APP_VERSION=live, must show green LIVE, never Muse.
     const liveChild = spawn(process.execPath, ['server.js'], { env: { ...process.env, PORT: '3457', DATA_FILE: '/tmp/vp-hosted-test-data-live.json', APP_VERSION: 'live' }, stdio: 'pipe' });
     try {

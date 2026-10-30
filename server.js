@@ -14,6 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { URL } = require('url');
 const storage = require('./lib/storage');
+const tiktok = require('./lib/tiktok');
 
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = process.env.DATA_FILE || path.join(__dirname, 'data.json');
@@ -56,7 +57,7 @@ function hashPassword(pw, salt) {
 // ---------- JSON store (fallback) ----------
 let db = null;
 function emptyDb() {
-  return { coordinator: null, clients: [], codes: [], portfolio: [], niches: [], videos: [], audit: [], replies: [], coordinatorTokens: [], clientTokens: [], files: [], pendingUploads: [] };
+  return { coordinator: null, clients: [], codes: [], portfolio: [], niches: [], videos: [], audit: [], replies: [], coordinatorTokens: [], clientTokens: [], files: [], pendingUploads: [], tiktokOauthStates: [], tiktokTokens: [] };
 }
 // Idempotent startup migration: backfills any keys missing from an older
 // stored db (JSON file or the Postgres kv row) without touching existing data.
@@ -172,10 +173,98 @@ function fullMessage(client, code, baseUrl) {
   return `Hi ${client.name}, your Video Publishing page is ready.\n\nStep 1: open your client page at ${clientUrl}\nStep 2: type this code on the first screen: ${code.code}\n\nYour account number is ${client.accountNumber}. The code expires in 7 days.\nThis code is not a clickable link — open the page above and type the code in.`;
 }
 
+// ---------- TikTok Login Kit OAuth ----------
+// The redirect URI registered in the TikTok developer portal must match
+// exactly. It is derived from the public host of each request, so the URI
+// to paste into TikTok's "Login Kit Web Redirect URI" field is:
+//   https://video-publishing-hosted.onrender.com/auth/tiktok/callback
+function tiktokRedirectUri(req) {
+  const proto = req.headers['x-forwarded-proto'] || 'http';
+  return `${proto}://${req.headers.host || 'localhost'}/auth/tiktok/callback`;
+}
+// Coordinator auth for the login route, which is a plain browser navigation
+// (no fetch headers): accepts the Bearer header OR a ?token= query param.
+function requireCoordinatorFlexible(d, req, u) {
+  const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || u.searchParams.get('token') || '';
+  return t && d.coordinatorTokens.some((x) => x.token === t) ? t : null;
+}
+// Simple HTML result pages for the OAuth callback (TikTok redirects the
+// coordinator's own browser here, so JSON would be a dead end).
+function oauthPage(res, code, title, message, ok) {
+  const colour = ok ? '#16a34a' : '#b91c1c';
+  res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title></head><body style="font-family:system-ui,Arial,sans-serif;max-width:640px;margin:60px auto;padding:20px;color:#241b2e"><h1 style="color:${colour}">${title}</h1><p style="font-size:18px">${message}</p><p><a href="/" style="color:#6b21a8;font-weight:700">Back to the coordinator desk</a></p></body></html>`);
+}
+// Returns { accessToken, openId } for a client, refreshing the TikTok token
+// when it is expired or nearly so. Returns null when the client has never
+// connected TikTok. Exported for the future Content Posting wiring.
+async function getValidTiktokToken(d, clientId, httpPost) {
+  const rec = tiktok.findVaultRecord(d.tiktokTokens, clientId, 'tiktok');
+  if (!rec) return null;
+  const key = tiktok.deriveVaultKey(d);
+  const tok = tiktok.readVaultRecord(rec, key);
+  if (tiktok.isTokenFresh(rec.expiresAt)) return { accessToken: tok.accessToken, openId: tok.openId };
+  const fresh = await tiktok.refreshAccessToken({ refreshToken: tok.refreshToken, httpPost });
+  const next = tiktok.buildVaultRecord({ clientId, network: 'tiktok', tokenJson: { ...fresh, refresh_token: fresh.refresh_token || tok.refreshToken, open_id: fresh.open_id || tok.openId }, key });
+  next.createdAt = rec.createdAt;
+  const i = d.tiktokTokens.indexOf(rec);
+  d.tiktokTokens[i] = next;
+  await putDb();
+  return { accessToken: fresh.access_token, openId: fresh.open_id || tok.openId };
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://localhost');
     const p = u.pathname;
+    // TikTok OAuth endpoints (browser flows, not /api/ JSON routes).
+    if (p.startsWith('/auth/')) {
+      if (p === '/auth/tiktok/login' && req.method === 'GET') {
+        const d = await getDb();
+        if (!tiktok.isConfigured()) return send(res, 503, { error: 'TikTok is not connected yet — set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET on the server, then try again.' });
+        if (!requireCoordinatorFlexible(d, req, u)) return send(res, 401, { error: 'Coordinator login required' });
+        const client = d.clients.find((c) => c.id === u.searchParams.get('clientId'));
+        if (!client) return send(res, 404, { error: 'Client not found' });
+        const state = crypto.randomBytes(32).toString('hex');
+        d.tiktokOauthStates.push({ state, clientId: client.id, createdAt: new Date().toISOString() });
+        d.tiktokOauthStates = d.tiktokOauthStates.filter((s) => Date.now() - new Date(s.createdAt).getTime() < 15 * 60 * 1000);
+        await putDb();
+        const url = tiktok.buildAuthUrl({ clientKey: process.env.TIKTOK_CLIENT_KEY, redirectUri: tiktokRedirectUri(req), state });
+        res.writeHead(302, { Location: url });
+        return res.end();
+      }
+      if (p === '/auth/tiktok/callback' && req.method === 'GET') {
+        const d = await getDb();
+        const tErr = u.searchParams.get('error');
+        if (tErr) return oauthPage(res, 400, 'TikTok connection cancelled', `TikTok reported: ${(u.searchParams.get('error_description') || tErr).replace(/[<>&]/g, '')}`, false);
+        if (!tiktok.isConfigured()) return oauthPage(res, 503, 'TikTok is not connected', 'The server is missing TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET. Set them, then start the connection again from the coordinator desk.', false);
+        const state = u.searchParams.get('state') || '';
+        const code = u.searchParams.get('code') || '';
+        const rec = d.tiktokOauthStates.find((s) => {
+          try { return s.state.length === state.length && crypto.timingSafeEqual(Buffer.from(s.state, 'utf8'), Buffer.from(state, 'utf8')); }
+          catch { return false; }
+        });
+        // States are single-use and expire after 15 minutes.
+        d.tiktokOauthStates = d.tiktokOauthStates.filter((s) => s !== rec && Date.now() - new Date(s.createdAt).getTime() < 15 * 60 * 1000);
+        await putDb();
+        if (!rec) return oauthPage(res, 400, 'Login session invalid or expired', 'Please start the TikTok connection again from the coordinator desk.', false);
+        const client = d.clients.find((c) => c.id === rec.clientId);
+        if (!client) return oauthPage(res, 400, 'Client not found', 'The client this connection was started for no longer exists.', false);
+        let tok;
+        try { tok = await tiktok.exchangeCode({ code, redirectUri: tiktokRedirectUri(req) }); }
+        catch (e) { return oauthPage(res, 502, 'TikTok would not issue a token', String(e.message || e).replace(/[<>&]/g, ''), false); }
+        try {
+          const key = tiktok.deriveVaultKey(d);
+          const next = tiktok.buildVaultRecord({ clientId: client.id, network: 'tiktok', tokenJson: tok, key });
+          d.tiktokTokens = d.tiktokTokens.filter((t) => !(t.clientId === client.id && t.network === 'tiktok'));
+          d.tiktokTokens.push(next);
+          audit(d, client.id, 'tiktok_connected', `TikTok account connected for ${client.name}`);
+          await putDb();
+        } catch (e) { return oauthPage(res, 500, 'Could not save the TikTok connection', String(e.message || e).replace(/[<>&]/g, ''), false); }
+        return oauthPage(res, 200, 'TikTok connected', `This client's TikTok account is connected. You can close this tab and return to the coordinator desk.`, true);
+      }
+      return send(res, 404, { error: 'Not found' });
+    }
     if (!p.startsWith('/api/')) {
       // Two doors, one backend: '/' is the coordinator-only desk, '/client'
       // is the client-only page. Both share the same record and /api/* routes.
@@ -203,6 +292,18 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
     if (p === '/api/status') return send(res, 200, { coordinatorSetUp: !!d.coordinator, version: versionBadge() });
+    // TikTok connection status for one client (coordinator only). Never
+    // returns tokens or secrets — only whether they exist and when they expire.
+    if (p === '/api/tiktok/status' && req.method === 'GET') {
+      if (!requireCoordinator(d, req)) return send(res, 401, { error: 'Coordinator login required' });
+      const rec = tiktok.findVaultRecord(d.tiktokTokens, u.searchParams.get('clientId'), 'tiktok');
+      return send(res, 200, {
+        configured: tiktok.isConfigured(),
+        connected: !!rec,
+        openId: rec ? rec.openId : null,
+        expiresAt: rec ? rec.expiresAt : null,
+      });
+    }
     if (p === '/api/login' && req.method === 'POST') {
       const b = await body(req);
       if (!d.coordinator || hashPassword(b.password || '', d.coordinator.salt) !== d.coordinator.hash) return send(res, 401, { error: 'Wrong password' });
@@ -521,4 +622,4 @@ const server = http.createServer(async (req, res) => {
 if (require.main === module) {
   server.listen(PORT, () => console.log(`Video Publishing App listening on ${PORT} (storage: ${process.env.DATABASE_URL ? 'postgres' : 'json-file'})`));
 }
-module.exports = { server, pickAccountNumber, containsBanned, threeDigitPool, makeCode, versionBadge, migrateDb, emptyDb, MAX_FILE_BYTES, STORAGE_TOTAL_BYTES };
+module.exports = { server, pickAccountNumber, containsBanned, threeDigitPool, makeCode, versionBadge, migrateDb, emptyDb, MAX_FILE_BYTES, STORAGE_TOTAL_BYTES, tiktok, tiktokRedirectUri, getValidTiktokToken };
