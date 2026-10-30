@@ -163,6 +163,7 @@ function selectClient(i, quiet){
     ${c.bridgeConnected?`<div class="banner">🌉 Bridge connected — last opened ${c.lastOpenedAt||''}, opens: ${c.codes.reduce((s,x)=>s+x.opens,0)}</div>`:''}
     <p>Email: ${esc(c.email)} | Phone: ${esc(c.phone)||'—'} | Approval: ${esc(c.approvalMode)}</p>
     <p>To test this client: Preview client side above, enter code ${c.activeCode?c.activeCode.code:'(no active code)'}.</p>
+    <h3>TikTok connection</h3><div id="tiktokConn"><p class="muted">Loading…</p></div>
     <h3>Files</h3><div id="coordFileList"><p class="muted">Loading…</p></div>
     <h3>Upload final files</h3>
     <label>Attach to video (optional)</label><select id="finalVideoSel"><option value="">Client-level (no video)</option></select>
@@ -170,6 +171,7 @@ function selectClient(i, quiet){
     <label class="file-banner" for="finalThumbFiles" tabindex="0"><span class="file-banner-title">Thumbnails (up to 50MB each)</span><span class="file-banner-hint">Tap here to choose files, or paste them here</span></label><input type="file" id="finalThumbFiles" class="file-input-hidden" multiple accept="image/*">
     <div id="finalUploadList"></div><p id="finalUploadError" class="error"></p>`;
   loadCoordFiles(c.id);
+  loadTiktokStatus(c.id);
   (c.videos||[]).forEach(v=>{ const o=document.createElement('option'); o.value=v.id; o.textContent=v.title+' ('+v.status+')'; document.getElementById('finalVideoSel').appendChild(o); });
   document.getElementById('finalVideoFile').addEventListener('change', function(){ coordUploadFiles(this.files,'final',c.id,document.getElementById('finalVideoSel').value||null); this.value=''; });
   document.getElementById('finalThumbFiles').addEventListener('change', function(){ coordUploadFiles(this.files,'thumbnail',c.id,document.getElementById('finalVideoSel').value||null); this.value=''; });
@@ -192,6 +194,21 @@ async function loadCoordFiles(clientId){
     const j = await api('/api/files?clientId='+encodeURIComponent(clientId),'GET',null,coordToken);
     el.innerHTML = j.files.map(f=>`<div class="file-row"><span class="fname">${esc(f.filename)}</span><span class="muted">${esc(f.kind)} · ${fmtMB(f.bytes)} · ${esc(f.uploaded_by)}${f.expires_at?` · expires ${new Date(f.expires_at).toLocaleDateString()}`:''}</span><button class="secondary" onclick="downloadFile('${f.id}')">Download</button><button class="secondary" onclick="deleteFile('${f.id}')">Delete</button></div>`).join('') || '<p class="muted">No files yet.</p>';
   }catch(e){ el.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+}
+async function loadTiktokStatus(clientId){
+  const el = document.getElementById('tiktokConn'); if(!el) return;
+  try{
+    const j = await api('/api/tiktok/status?clientId='+encodeURIComponent(clientId),'GET',null,coordToken);
+    if(!j.configured){ el.innerHTML = '<p class="muted">TikTok is not connected on the server yet — the coordinator must set TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET in the hosting dashboard first.</p>'; return; }
+    if(j.connected){
+      el.innerHTML = `<p><span class="badge">TikTok connected</span></p><p class="muted">Token expires ${j.expiresAt?new Date(j.expiresAt).toLocaleString():'—'} — it refreshes itself automatically.</p><button class="secondary" onclick="connectTiktok('${clientId}')">Reconnect TikTok</button>`;
+    } else {
+      el.innerHTML = `<p class="muted">Not connected. The client will sign in on TikTok's own screen — we never see their password.</p><button class="big" onclick="connectTiktok('${clientId}')">Connect TikTok →</button>`;
+    }
+  }catch(e){ el.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+}
+function connectTiktok(clientId){
+  window.location = '/auth/tiktok/login?clientId='+encodeURIComponent(clientId)+'&token='+encodeURIComponent(coordToken);
 }
 async function coordUploadFiles(fileList, kind, clientId, videoId){
   const listEl = document.getElementById('finalUploadList'), errEl = document.getElementById('finalUploadError');
