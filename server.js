@@ -179,7 +179,9 @@ const server = http.createServer(async (req, res) => {
     if (!p.startsWith('/api/')) {
       // Two doors, one backend: '/' is the coordinator-only desk, '/client'
       // is the client-only page. Both share the same record and /api/* routes.
-      let file = p === '/' ? '/index.html' : p === '/client' ? '/client.html' : p;
+      // '/terms' and '/privacy' serve the public policy pages (required by the
+      // networks' developer programs).
+      let file = p === '/' ? '/index.html' : p === '/client' ? '/client.html' : p === '/terms' ? '/terms.html' : p === '/privacy' ? '/privacy.html' : p;
       const fp = path.join(__dirname, 'public', file);
       if (!fp.startsWith(path.join(__dirname, 'public')) || !fs.existsSync(fp)) { res.writeHead(404); return res.end('Not found'); }
       const ext = path.extname(fp);
