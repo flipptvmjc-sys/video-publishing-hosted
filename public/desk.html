@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coordinator Desk — Beyond Copper Branding</title>
+<link rel="icon" href="/logo-main.webp">
+<style>
+/* Coordinator desk — dark theme, light text (BCB gold standard: deep navy, copper accents, bold white headings). */
+body{font-family:system-ui,Arial,sans-serif;font-size:18px;line-height:1.45;color:#f2ecf7;margin:0;background:#101827}
+header{background:#0b1220;color:#fff;padding:16px 20px;border-bottom:3px solid #c8752d}
+header h1{margin:0;font-size:28px} header p{margin:6px 0 0;color:#c9b8d6}
+main{max-width:1060px;margin:0 auto;padding:20px}
+.card{background:#1b2740;border:1px solid #2c3d5f;border-radius:14px;padding:20px;margin:16px 0}
+.card h2{margin:0 0 8px;font-size:24px;color:#fff}
+.muted{color:#b7a8c9} .small{font-size:15px}
+label{display:block;font-weight:700;margin:12px 0 4px}
+input,select,textarea{width:100%;font-size:18px;padding:12px;border:2px solid #3a4c6e;border-radius:10px;box-sizing:border-box;background:#0f1830;color:#f2ecf7}
+button{font-size:18px;font-weight:700;padding:12px 18px;border-radius:12px;border:0;background:#c8752d;color:#fff;cursor:pointer;margin:6px 6px 6px 0}
+button.secondary{background:#2c3d5f;color:#f2ecf7} button.danger{background:#7f1d1d} button:disabled{opacity:.5;cursor:default}
+.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:15px;font-weight:800}
+.b-queued{background:#334155;color:#e2e8f0}.b-running{background:#1d4ed8;color:#fff}.b-done{background:#166534;color:#fff}.b-failed{background:#991b1b;color:#fff}.b-gated{background:#713f12;color:#fff}
+.b-draft{background:#334155;color:#e2e8f0}.b-approved{background:#166534;color:#fff}.b-posted{background:#0e7490;color:#fff}.b-rejected{background:#991b1b;color:#fff}.b-superseded{background:#3f3f46;color:#d4d4d8}
+.b-overdue{background:#991b1b;color:#fff}.b-blocked{background:#713f12;color:#fff}.b-ok{background:#166534;color:#fff}
+.b-unverified{background:#713f12;color:#fff}.b-sourced{background:#166534;color:#fff}.b-verified{background:#0e7490;color:#fff}
+.row-item{border-top:1px solid #2c3d5f;padding:14px 0}
+.row-item:first-child{border-top:0}
+.row-item h3{margin:0 0 4px;font-size:19px;color:#fff}
+.row-item p{margin:4px 0}
+.error{color:#fca5a5;font-weight:700}
+.hidden{display:none}
+.tabs{margin:16px 0}
+.tabs button{background:#1b2740;border:1px solid #2c3d5f;color:#f2ecf7}
+.tabs button.active{background:#c8752d;border-color:#c8752d;color:#fff}
+pre{white-space:pre-wrap;background:#0f1830;padding:12px;border-radius:10px;font-size:15px;color:#e2e8f0}
+a{color:#e8a04c;font-weight:700}
+</style></head><body>
+<header><h1>Beyond Copper Branding — Coordinator Desk</h1><p>SLA queue · replies · AI jobs · plans · trend feed · publish queue · token health · comment intake. Every state shown is the real state: queued, running, done, failed, or gated — never a fake.</p><div id="versionBadge" class="small" style="margin-top:8px"></div></header>
+<main>
+<div id="view-gate"><div class="card"><h2>Coordinator login</h2>
+<label>Coordinator password</label><input type="password" id="loginPw">
+<button onclick="login()">Log in</button>
+<p id="gateError" class="error"></p>
+<p class="muted small">Same coordinator password as the CEO Portal. Your session is stored in this browser only.</p>
+</div></div>
+
+<div id="view-desk" class="hidden">
+  <div class="card"><p id="aiStatus" class="muted">Loading…</p>
+    <button class="secondary" onclick="loadDesk()">Refresh</button>
+    <button class="secondary" onclick="logout()">Log out</button>
+    <a href="/" style="margin-left:8px">← CEO Portal</a>
+    <p id="deskError" class="error"></p></div>
+
+  <div class="tabs card">
+    <button onclick="showSection('sla')" id="tab-sla" class="active">SLA queue</button>
+    <button onclick="showSection('replies')" id="tab-replies">Replies</button>
+    <button onclick="showSection('jobs')" id="tab-jobs">AI jobs</button>
+    <button onclick="showSection('plans')" id="tab-plans">Plans</button>
+    <button onclick="showSection('watch')" id="tab-watch">Trend feed</button>
+    <button onclick="showSection('publish')" id="tab-publish">Publish queue</button>
+    <button onclick="showSection('tokens')" id="tab-tokens">Token health</button>
+    <button onclick="showSection('intake')" id="tab-intake">Comment intake</button>
+  </div>
+
+  <div id="sec-sla" class="card"><h2>SLA queue — 3-day clock</h2>
+    <p class="muted">Clock starts at intake and counts only unpaused time. Blocking pauses it; unblocking resumes it and moves the deadline by exactly the paused time. Sorted by time left.</p>
+    <div id="slaList"></div></div>
+
+  <div id="sec-replies" class="card hidden"><h2>Replies — draft first</h2>
+    <p class="muted">AI-drafted replies land as drafts. Nothing posts without coordinator approval. “Mark posted” means you posted the approved reply yourself — no platform API is wired yet, so the record says manual.</p>
+    <label>Filter</label><select id="replyFilter" onchange="renderReplies()"><option value="">All statuses</option><option value="draft">Draft</option><option value="approved">Approved</option><option value="posted">Posted</option><option value="rejected">Rejected</option></select>
+    <div id="replyList"></div></div>
+
+  <div id="sec-jobs" class="card hidden"><h2>AI jobs</h2>
+    <p class="muted">Batch jobs through the Sophia wrapper (one at a time, 300 MiB gate). A gated job is an honest outcome — it was refused for memory, never forced.</p>
+    <div id="jobForm">
+      <label>Enqueue a job</label>
+      <select id="jobType"><option value="plan_video">plan_video</option><option value="playbook">playbook</option><option value="network_watch">network_watch</option><option value="niche_check">niche_check</option><option value="draft_reply">draft_reply</option></select>
+      <label>Video ID (for plan_video / draft_reply)</label><input id="jobVideoId" placeholder="video id, or blank">
+      <label>Client ID (for playbook / niche_check / network_watch)</label><input id="jobClientId" placeholder="client id, or blank">
+      <button onclick="enqueueJob()">Enqueue job</button>
+      <p id="jobFormMsg" class="muted small"></p>
+    </div>
+    <div id="jobList"></div></div>
+
+  <div id="sec-plans" class="card hidden"><h2>Plans — versioned</h2>
+    <p class="muted">A new version arrives as a draft with a visible diff. An approved version stays approved until you explicitly approve the new one — a new version never silently overwrites an approved caption or plan.</p>
+    <div id="planList"></div></div>
+
+  <div id="sec-watch" class="card hidden"><h2>Trend feed — weekly network watch</h2>
+    <p id="feedFreshness" class="muted"></p>
+    <button onclick="runWatchNow()">Run network check now</button>
+    <p class="muted small">Runs a network_watch batch job through the wrapper. The wrapper passes WebSearch/WebFetch for this job type, so items are researched on the web and graded “sourced” with the fetched URL; anything the model could not verify is graded “unverified” — that is the honest result, not a failure.</p>
+    <div id="watchList"></div></div>
+
+  <div id="sec-publish" class="card hidden"><h2>Publish queue — per platform</h2>
+    <p class="muted">One record per platform, with its own state (draft / needs_approval / scheduled / sending / sent / error / failed) and its own retry (3 attempts, 10 minutes apart). A platform is only ever marked sent when the platform itself confirms the post. <b>3 of 4 live is the dangerous state</b> — a video with some platforms sent and others failed is flagged here, never hidden. No platform adapter is enabled yet, so the worker refuses honestly until Michael gives the per-platform go-ahead (TikTok first).</p>
+    <p id="publishNote" class="muted small"></p>
+    <div id="publishList"></div></div>
+
+  <div id="sec-tokens" class="card hidden"><h2>Token health — three layers</h2>
+    <p class="muted">Hourly sweep + pre-slot check + pre-call validation. A token near expiry is refreshed; a dead token marks the account EXPIRED, fails its due posts with the platform's own message, and shows a Reconnect chip here. Token values are never shown — only whether they exist and when they expire.</p>
+    <div id="tokenList"></div></div>
+
+  <div id="sec-intake" class="card hidden"><h2>Comment intake — webhook</h2>
+    <p class="muted">Comments and DMs arrive by Meta webhook (signature-verified, deduped by message id). Layer 1 keyword matches (price / link / info / available) get a one-sentence reply routing to DM, drafted instantly — still a draft until you approve it. Everything else enqueues an AI draft (see Replies). Nothing auto-posts. First-hour replies are timed from the video's published time.</p>
+    <div id="intakeList"></div></div>
+</div>
+</main>
+<script>
+let coordToken = localStorage.getItem('coordToken') || '';
+let desk = null;
+async function api(path, method, body, token){
+  const r = await fetch(path, {method, headers:{'Content-Type':'application/json', ...(token?{Authorization:'Bearer '+token}:{})}, body: body?JSON.stringify(body):undefined});
+  const j = await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||('Error '+r.status)); return j;
+}
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function badge(status){ return '<span class="badge b-'+esc(status)+'">'+esc(status)+'</span>'; }
+function ago(iso){ if(!iso) return 'never'; const ms = Date.now()-new Date(iso).getTime(); const h = Math.floor(ms/3600000); if(h<1) return Math.max(0,Math.floor(ms/60000))+'m ago'; if(h<48) return h+'h ago'; return Math.floor(h/24)+'d ago'; }
+function dur(ms){ if(ms==null) return '—'; const s=Math.round(ms/1000); if(s<60) return s+'s'; const m=Math.floor(s/60); if(m<60) return m+'m '+(s%60)+'s'; const h=Math.floor(m/60); if(h<48) return h+'h '+(m%60)+'m'; return Math.floor(h/24)+'d '+(h%24)+'h'; }
+function showSection(name){
+  ['sla','replies','jobs','plans','watch','publish','tokens','intake'].forEach(n=>{
+    document.getElementById('sec-'+n).classList.toggle('hidden', n!==name);
+    document.getElementById('tab-'+n).classList.toggle('active', n===name);
+  });
+}
+async function login(){
+  const pw = document.getElementById('loginPw').value;
+  try{ const r = await api('/api/login','POST',{password:pw}); coordToken=r.token; localStorage.setItem('coordToken',coordToken); document.getElementById('gateError').textContent=''; showDesk(); }
+  catch(e){ document.getElementById('gateError').textContent=e.message; }
+}
+function logout(){ coordToken=''; localStorage.removeItem('coordToken'); document.getElementById('view-desk').classList.add('hidden'); document.getElementById('view-gate').classList.remove('hidden'); }
+function showDesk(){ document.getElementById('view-gate').classList.add('hidden'); document.getElementById('view-desk').classList.remove('hidden'); loadDesk(); }
+async function loadDesk(){
+  try{
+    desk = await api('/api/coordinator/desk','GET',null,coordToken);
+    document.getElementById('deskError').textContent='';
+    const st = await api('/api/status','GET');
+    document.getElementById('versionBadge').textContent = st.version.text;
+    document.getElementById('aiStatus').textContent =
+      'AI mode: '+desk.ai.mode+' · videos: '+desk.counts.videos+' · blocked: '+desk.counts.blocked+' · overdue: '+desk.counts.overdue+
+      ' · replies awaiting approval: '+desk.counts.repliesDraft+' · jobs queued: '+desk.counts.jobsQueued+' / running: '+desk.counts.jobsRunning+' / failed: '+desk.counts.jobsFailed+
+      ' · plan drafts: '+desk.counts.plansDraft;
+    renderSla(); renderReplies(); renderJobs(); renderPlans(); renderWatch(); renderPublish(); renderTokens(); renderIntake();
+  }catch(e){ document.getElementById('deskError').textContent=e.message; if(/login/i.test(e.message)) logout(); }
+}
+function renderSla(){
+  const el = document.getElementById('slaList');
+  if(!desk.videos.length){ el.innerHTML='<p class="muted">No videos yet.</p>'; return; }
+  el.innerHTML = desk.videos.map(v=>{
+    const s = v.sla;
+    const state = s.blocked ? badge('blocked')+' BLOCKED' : s.overdue ? badge('overdue')+' OVERDUE' : badge('ok')+' on track';
+    return '<div class="row-item"><h3>'+esc(v.title)+' '+badge(v.status)+'</h3>'
+      + '<p class="muted">'+esc(v.clientName||'—')+' · stage: '+esc(v.status)+' · schedule: '+(v.schedule&&Object.keys(v.schedule).length?esc(JSON.stringify(v.schedule)):'not scheduled')+'</p>'
+      + '<p>Deadline (original): '+esc(s.deadlineAt||'—')+'<br>Deadline (active time): <b>'+esc(s.deadlineActiveAt)+'</b><br>'
+      + 'Paused so far: '+dur(s.pausedMs)+(s.blocked?' (currently paused '+dur(s.currentlyPausedMs)+')':'')+'<br>'
+      + 'Time left (active time): '+(s.overdue?'<b>overdue by '+dur(-s.msRemainingActive)+'</b>':dur(s.msRemainingActive))+' · '+state+'</p>'
+      + (s.blocked?'<p class="muted">Blocked: '+esc(s.blockedReason)+' · owner: '+esc(s.blockedOwner)+'</p><button onclick="unblockVideo(\''+esc(v.id)+'\')">Unblock — resume clock</button>'
+        :'<label>Block reason</label><input id="block-reason-'+esc(v.id)+'" placeholder="e.g. waiting on client files"><label>Owner</label><input id="block-owner-'+esc(v.id)+'" value="coordinator"><button class="secondary" onclick="blockVideo(\''+esc(v.id)+'\')">Block — pause clock</button>')
+      + '<button class="secondary" onclick="publishVideo(\''+esc(v.id)+'\')">Publish (all platforms, due now)</button>'
+      + '</div>';
+  }).join('');
+}
+async function blockVideo(id){
+  const reason = document.getElementById('block-reason-'+id).value;
+  const owner = document.getElementById('block-owner-'+id).value || 'coordinator';
+  try{ await api('/api/videos/'+id+'/block','POST',{reason,owner},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+async function unblockVideo(id){
+  try{ await api('/api/videos/'+id+'/unblock','POST',{},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+function renderReplies(){
+  const el = document.getElementById('replyList');
+  const f = document.getElementById('replyFilter').value;
+  const list = desk.replies.filter(r=>!f||r.status===f);
+  if(!list.length){ el.innerHTML='<p class="muted">No replies'+(f?' with status '+f:'')+' yet.</p>'; return; }
+  el.innerHTML = list.map(r=>{
+    let actions='';
+    if(r.status==='draft') actions='<button onclick="replyAction(\''+esc(r.videoId)+'\',\''+esc(r.id)+'\',\'approve\')">Approve</button><button class="danger" onclick="replyReject(\''+esc(r.videoId)+'\',\''+esc(r.id)+'\')">Reject</button>';
+    else if(r.status==='approved') actions='<button onclick="replyAction(\''+esc(r.videoId)+'\',\''+esc(r.id)+'\',\'post\')">Mark posted (manual)</button><button class="danger" onclick="replyReject(\''+esc(r.videoId)+'\',\''+esc(r.id)+'\')">Reject</button>';
+    return '<div class="row-item"><h3>'+esc(r.videoTitle||'—')+' '+badge(r.status)+'</h3>'
+      + '<p>'+esc(r.text)+'</p>'
+      + '<p class="muted small">'+(r.aiGenerated?'AI-drafted':'Coordinator')+(r.model?' · '+esc(r.model):'')+' · '+esc(r.createdAt||'')+(r.comment?' · on: “'+esc(r.comment)+'”':'')+(r.rejectionReason?' · rejected: '+esc(r.rejectionReason):'')+(r.postedChannel?' · posted: '+esc(r.postedChannel):'')+'</p>'
+      + actions+'</div>';
+  }).join('');
+}
+async function replyAction(videoId, replyId, action){
+  try{ await api('/api/videos/'+videoId+'/replies/'+replyId+'/'+action,'POST',{},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+async function replyReject(videoId, replyId){
+  const reason = prompt('Rejection reason (shown on the record):')||'';
+  try{ await api('/api/videos/'+videoId+'/replies/'+replyId+'/reject','POST',{reason},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+function renderJobs(){
+  const el = document.getElementById('jobList');
+  if(!desk.jobs.length){ el.innerHTML='<p class="muted">No AI jobs yet.</p>'; return; }
+  el.innerHTML = desk.jobs.map(j=>{
+    return '<div class="row-item"><h3>'+esc(j.type)+' '+badge(j.status)+'</h3>'
+      + '<p class="muted small">queued '+esc(j.createdAt||'')+(j.completedAt?' · finished '+esc(j.completedAt):'')+(j.wrapperJobId?' · wrapper '+esc(j.wrapperJobId):'')+'</p>'
+      + (j.error?'<p class="error">'+esc(j.error)+'</p>':'')
+      + (j.result&&j.result.note?'<p class="muted">'+esc(j.result.note)+'</p>':'')
+      + (j.result&&j.result.planId?'<p>Plan stored: '+esc(j.result.planId)+(j.result.planVersion?' (v'+j.result.planVersion+')':'')+'</p>':'')
+      + (j.result&&j.result.replyId?'<p>Reply drafted (see Replies).</p>':'')
+      + (j.result&&j.result.watchId?'<p>Watch edition stored (see Trend feed).</p>':'')
+      + '</div>';
+  }).join('');
+}
+async function enqueueJob(){
+  const type = document.getElementById('jobType').value;
+  const videoId = document.getElementById('jobVideoId').value.trim()||undefined;
+  const clientId = document.getElementById('jobClientId').value.trim()||undefined;
+  try{
+    const r = await api('/api/coordinator/ai/jobs','POST',{type,videoId,clientId},coordToken);
+    document.getElementById('jobFormMsg').textContent='Queued: '+r.job.id+' ('+r.job.status+')';
+    loadDesk();
+  }catch(e){ document.getElementById('jobFormMsg').textContent=e.message; }
+}
+function renderPlans(){
+  const el = document.getElementById('planList');
+  if(!desk.plans.length){ el.innerHTML='<p class="muted">No plans yet.</p>'; return; }
+  el.innerHTML = desk.plans.map(pl=>{
+    const diff = pl.diffVs && pl.diffVs.changed && pl.diffVs.changed.length
+      ? 'Changed vs v'+pl.diffVs.previousVersion+': '+pl.diffVs.changed.join(', ')
+      : (pl.diffVs && pl.diffVs.previousVersion==null ? 'First version for this video' : 'No changes vs previous version');
+    let actions='';
+    if(pl.status==='draft') actions='<button onclick="planAction(\''+esc(pl.id)+'\',\'approve\')">Approve v'+pl.version+'</button><button class="danger" onclick="planReject(\''+esc(pl.id)+'\')">Reject</button>';
+    return '<div class="row-item"><h3>'+esc(pl.title||'Untitled plan')+' — v'+pl.version+' '+badge(pl.status)+'</h3>'
+      + '<p class="muted">'+esc(pl.videoTitle||'—')+' · '+esc(pl.clientName||'—')+' · '+esc(pl.createdAt||'')+'</p>'
+      + '<p class="small">'+esc(diff)+(pl.rejectionReason?' · rejected: '+esc(pl.rejectionReason):'')+'</p>'
+      + (pl.script?'<p class="small">Hook: '+esc(pl.script.hook||'')+'<br>CTA: '+esc(pl.script.cta||'')+'</p>':'')
+      + actions+'</div>';
+  }).join('');
+}
+async function planAction(id, action){
+  try{ await api('/api/coordinator/ai/plans/'+id+'/'+action,'POST',{},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+async function planReject(id){
+  const reason = prompt('Rejection reason (shown on the record):')||'';
+  try{ await api('/api/coordinator/ai/plans/'+id+'/reject','POST',{reason},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+function renderWatch(){
+  const f = desk.freshness;
+  document.getElementById('feedFreshness').textContent =
+    f.status==='never' ? 'Never checked — no network-watch edition yet. Next check: run one now.'
+    : 'Last checked '+ago(f.lastCheckedAt)+' ('+f.lastCheckedAt+') · Next check '+f.nextCheckAt+(f.status==='overdue'?' · OVERDUE':'');
+  const el = document.getElementById('watchList');
+  if(!desk.watch.length){ el.innerHTML='<p class="muted">No watch editions yet.</p>'; return; }
+  el.innerHTML = desk.watch.map(w=>{
+    const d = w.diff||{added:[],changed:[],removed:[]};
+    const items = (w.items||[]).map(it=>{
+      return '<div class="row-item"><h3>'+esc(it.platform)+' — '+badge(it.sourceGrade)+'</h3>'
+        + '<p>'+esc(it.claim)+'</p>'
+        + '<p class="muted small">'+(it.sourceUrl?'<a href="'+esc(it.sourceUrl)+'" target="_blank" rel="noopener">source</a> · ':'')+(it.source?'source: '+esc(it.source)+' · ':'')+'published: '+esc(it.publishedAt||'unknown')+' · observed: '+esc(it.observedAt||'—')
+        + (it.affectsClients&&it.affectsClients.length?' · affects: '+esc(it.affectsClients.join(', ')):' · affects: no client')+(it.action?'<br>Action: '+esc(it.action):'')+'</p></div>';
+    }).join('');
+    return '<div class="row-item"><h3>Week of '+esc(w.weekOf||'—')+'</h3>'
+      + '<p class="muted small">Edition '+esc(w.id)+' · checked '+esc(w.createdAt||'')+' · '+(d.added||[]).length+' new · '+(d.changed||[]).length+' changed · '+(d.removed||[]).length+' gone since last edition</p>'
+      + ((d.added||[]).length?'<p class="small">New: '+d.added.map(a=>esc(a.claim)).join(' | ')+'</p>':'')
+      + ((d.removed||[]).length?'<p class="small">Gone: '+d.removed.map(a=>esc(a.claim)).join(' | ')+'</p>':'')
+      + items
+      + ((w.unverified&&w.unverified.length)?'<p class="small muted">Unverified this week: '+w.unverified.map(esc).join(' | ')+'</p>':'')
+      + '</div>';
+  }).join('');
+}
+async function runWatchNow(){
+  try{
+    const r = await api('/api/coordinator/ai/jobs','POST',{type:'network_watch'},coordToken);
+    document.getElementById('feedFreshness').textContent='Network-watch job queued: '+r.job.id+' — poll the AI jobs tab for the result.';
+    loadDesk();
+  }catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+function renderPublish(){
+  const el = document.getElementById('publishList');
+  const note = desk.publish && desk.publish.note ? desk.publish.note : '';
+  document.getElementById('publishNote').textContent = note;
+  const list = desk.publishQueue || [];
+  if(!list.length){ el.innerHTML='<p class="muted">No publish records yet — queue a video for publishing from the SLA queue or via the publish route.</p>'; return; }
+  el.innerHTML = list.map(s=>{
+    const rows = s.platforms.map(pl=>{
+      let actions='';
+      if(pl.status==='needs_approval') actions='<button onclick="publishAction(\''+esc(s.videoId)+'\',\''+esc(pl.platform)+'\',\'approve\')">Approve</button>';
+      else if(pl.status==='error'||pl.status==='failed') actions='<button onclick="publishAction(\''+esc(s.videoId)+'\',\''+esc(pl.platform)+'\',\'retry\')">Retry (fresh attempt)</button>';
+      return '<p>'+esc(pl.platform)+' '+badge(pl.status)
+        + (pl.postId?' · post: '+esc(pl.postId):'')
+        + (pl.attempts?' · attempts: '+pl.attempts:'')
+        + (pl.nextRetryAt?' · next retry: '+esc(pl.nextRetryAt):'')
+        + (pl.needsReconnect?' · <b>RECONNECT NEEDED</b>':'')
+        + (pl.errorText?'<br><span class="error">'+esc(pl.errorText)+'</span>':'')
+        + (actions?'<br>'+actions:'')+'</p>';
+    }).join('');
+    return '<div class="row-item"><h3>'+esc(s.videoTitle)+' '+(s.partialFailure?'<span class="badge b-failed">PARTIAL FAILURE — '+s.sent+' of '+(s.sent+s.failed)+' live</span>':s.allSent?badge('sent'):s.hasFailure?badge('failed'):'')+'</h3>'
+      + '<p class="muted">'+esc(s.clientName||'—')+' · sent: '+s.sent+' · failed: '+s.failed+'</p>' + rows
+      + '<p><label>Queue for publishing</label><select id="pub-plats-'+esc(s.videoId)+'" multiple size="4"><option value="tiktok" selected>TikTok</option><option value="youtube" selected>YouTube</option><option value="instagram" selected>Instagram</option><option value="facebook" selected>Facebook</option></select>'
+      + '<button onclick="publishVideo(\''+esc(s.videoId)+'\')">Publish now (due platforms)</button></p></div>';
+  }).join('');
+}
+async function publishVideo(id){
+  const sel = document.getElementById('pub-plats-'+id);
+  const platforms = sel ? Array.from(sel.selectedOptions).map(o=>o.value) : undefined;
+  try{ await api('/api/videos/'+id+'/publish','POST',{platforms},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+async function publishAction(videoId, platform, action){
+  try{ await api('/api/videos/'+videoId+'/publish/'+platform+'/'+action,'POST',{},coordToken); loadDesk(); }
+  catch(e){ document.getElementById('deskError').textContent=e.message; }
+}
+function renderTokens(){
+  const el = document.getElementById('tokenList');
+  const list = desk.tokens || [];
+  if(!list.length){ el.innerHTML='<p class="muted">No platform accounts connected yet.</p>'; return; }
+  el.innerHTML = list.map(t=>{
+    return '<div class="row-item"><h3>'+esc(t.clientName||'—')+' — '+esc(t.platform)+' '+badge(t.status)+'</h3>'
+      + '<p class="muted small">expires: '+esc(t.expiresAt||'never recorded')+(t.scope?' · scope: '+esc(t.scope):'')+'</p>'
+      + (t.reason?'<p>'+esc(t.reason)+'</p>':'')
+      + (t.reconnect?'<p><b>Reconnect:</b> '+esc(t.reconnect)+'</p>':'')
+      + '</div>';
+  }).join('');
+}
+function renderIntake(){
+  const el = document.getElementById('intakeList');
+  const list = desk.webhookEvents || [];
+  if(!list.length){ el.innerHTML='<p class="muted">No webhook events yet. Meta posts comments and DMs here the moment they happen.</p>'; return; }
+  el.innerHTML = list.map(e=>{
+    return '<div class="row-item"><h3>'+esc(e.platform)+' '+esc(e.kind)+' '+badge(e.status)+'</h3>'
+      + '<p>'+esc(e.text||'(no text)')+'</p>'
+      + '<p class="muted small">from: '+esc(e.from||'—')+' · video: '+esc(e.videoTitle||'—')+' · '+esc(e.receivedAt||'')
+      + (e.layer?' · layer: '+esc(e.layer):'')+(e.withinFirstHour===true?' · FIRST HOUR':e.withinFirstHour===false?' · after first hour':'')
+      + (e.reason?' · '+esc(e.reason):'')+'</p></div>';
+  }).join('');
+}
+(async function init(){
+  const s = await api('/api/status','GET');
+  document.getElementById('versionBadge').textContent = s.version.text;
+  if(coordToken){ try{ await api('/api/coordinator/desk','GET',null,coordToken); showDesk(); }catch{ coordToken=''; localStorage.removeItem('coordToken'); } }
+})();
+</script>
+</body></html>
